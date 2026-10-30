@@ -1,0 +1,40 @@
+:root { color-scheme: dark; --bg: #0b0e13; --panel: #111720; --line: #27313e; --text: #eef3f9; --muted: #96a5b7; --mint: #8cf0c8; --blue: #92b7ff; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+body { background-image: radial-gradient(circle at 80% 10%, rgba(75, 117, 174, .13), transparent 30%), radial-gradient(circle at 8% 24%, rgba(72, 185, 147, .08), transparent 28%); }
+a { color: inherit; text-decoration: none; }
+button { font: inherit; cursor: pointer; }
+.shell { width: min(1120px, calc(100% - 40px)); margin: 0 auto; }
+.nav { height: 76px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(130,151,174,.17); }
+.brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 750; letter-spacing: -.04em; font-size: 19px; }
+.brand-mark { width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; color: #09110e; background: var(--mint); font-weight: 900; }
+.brand-muted { color: var(--muted); font-weight: 500; }
+.nav-tag, .eyebrow, .card-label { font-size: 11px; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); }
+.hero { padding: 82px 0 54px; max-width: 800px; }
+.eyebrow { display: flex; align-items: center; gap: 10px; color: var(--mint); font-weight: 700; }
+.pulse { height: 7px; width: 7px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 14px rgba(140,240,200,.65); }
+h1 { margin: 22px 0 20px; font-size: clamp(42px, 6vw, 70px); line-height: 1.04; letter-spacing: -.065em; font-weight: 680; }
+h1 span { color: var(--mint); }
+.hero-copy { max-width: 650px; color: #a9b5c4; line-height: 1.75; font-size: 17px; }
+.hero-actions { display: flex; align-items: center; gap: 12px; margin-top: 28px; flex-wrap: wrap; }
+.primary-button, .secondary-button { border-radius: 10px; padding: 12px 16px; font-size: 14px; font-weight: 650; }
+.primary-button { border: 1px solid var(--mint); background: var(--mint); color: #08120e; }
+.primary-button span { margin-left: 14px; }
+.secondary-button { border: 1px solid var(--line); color: var(--text); background: rgba(255,255,255,.025); }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+.feature-card { min-height: 210px; padding: 23px; border: 1px solid var(--line); border-radius: 15px; background: linear-gradient(145deg, rgba(22,30,42,.92), rgba(13,18,26,.92)); }
+.feature-icon { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid #344356; border-radius: 10px; font-size: 22px; color: var(--mint); }
+h2 { margin: 20px 0 9px; font-size: 17px; letter-spacing: -.02em; }
+.feature-card p { min-height: 54px; margin: 0 0 20px; font-size: 13px; line-height: 1.65; color: var(--muted); }
+.card-label { color: #70849b; font-size: 10px; }
+.status-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding: 17px 20px; border: 1px solid var(--line); border-radius: 14px; background: rgba(16,22,31,.78); }
+.status-card strong { font-size: 13px; }
+.status-dot { display: inline-block; height: 7px; width: 7px; margin-right: 10px; border-radius: 50%; background: #8893a3; }
+.status-dot.online { background: var(--mint); }
+.status-dot.offline { background: #ff8989; }
+.status-dot.checking { background: #ffd27a; }
+.status-description { margin: 7px 0 0 17px; color: var(--muted); font-size: 12px; }
+.status-right { display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 11px; }
+.refresh-button { border: 1px solid #344356; border-radius: 8px; background: transparent; color: var(--text); padding: 8px 10px; font-size: 12px; }
+.footer { display: flex; justify-content: space-between; gap: 15px; padding: 30px 0 25px; color: #66778b; font-size: 11px; }
+@media (max-width: 720px) { .shell { width: min(100% - 28px, 1120px); } .nav-tag { display: none; } .hero { padding: 55px 0 35px; } .grid { grid-template-columns: 1fr; } .feature-card { min-height: auto; } .feature-card p { min-height: auto; } .status-card, .footer { align-items: flex-start; flex-direction: column; } .status-right { width: 100%; justify-content: space-between; } }
