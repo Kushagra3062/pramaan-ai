@@ -258,12 +258,64 @@ Response:
 
 ---
 
-## 8. Testing
+## 8. Milestone 3.1: Meta Muse Spark Vision Integration & OCR Quality
 
-Run tests against local PostgreSQL with rollback transactions:
+Milestone 3.1 introduces multimodal AI vision transcription using **Meta Muse Spark 1.3** alongside Tesseract OCR, offering higher fidelity multilingual (Malayalam + English) text recognition, sentence/word-boundary chunking, and dual-provider comparison.
+
+### Provider Modes
+1. **`tesseract`** (Default): Local OCR engine via PyMuPDF and Tesseract. Fully offline, fast, zero cloud dependencies.
+2. **`meta_vision`**: Cloud multimodal transcription via `muse-spark-1.3` using the OpenAI-compatible SDK (`https://api.meta.ai/v1`). Delivers superior Malayalam and mixed-script recognition.
+3. **`compare`**: Runs **both** Tesseract and Meta Vision on targeted pages. Persists both outputs into `page_extraction_attempts` for evaluation and side-by-side comparison without altering canonical document text.
+
+### Automatic Fallback
+When `META_VISION_FALLBACK_TO_TESSERACT=true` (default), any transient API error (rate limits, timeouts, service outages) automatically falls back to local Tesseract OCR, recording both the failed Meta attempt and the fallback attempt.
+
+### Boundary-Preserving Chunking
+Chunking respects natural document boundaries:
+- Paragraph breaks (`\n\n`)
+- Line breaks (`\n`)
+- Sentence terminators (`. `, `? `, `! `, and Indic danda `। `)
+- Word boundaries (whitespace)
+- SHA-256 hashes and token estimations computed deterministically.
+
+### Configuration (`.env`)
+```bash
+SCANNED_PAGE_EXTRACTOR=tesseract       # Default provider: tesseract | meta_vision | compare
+META_VISION_FALLBACK_TO_TESSERACT=true # Fallback to local OCR if vision call fails
+META_VISION_DPI=250                    # Render resolution for vision input
+META_VISION_MAX_IMAGE_DIM=2048         # Clamps maximum image dimension (width/height)
+MODEL_API_KEY=<your-meta-api-key>      # API Key for api.meta.ai
+META_MODEL_ID=muse-spark-1.3           # Vision model identifier
+```
+
+### Extraction Attempts & Comparison Endpoints
+- `POST /api/v1/workspaces/{workspace_id}/documents/{document_id}/ocr`
+  ```json
+  {
+    "provider": "meta_vision",
+    "fallback_to_tesseract": true,
+    "dpi": 250
+  }
+  ```
+- `GET /api/v1/workspaces/{workspace_id}/documents/{document_id}/extraction-attempts`
+  Returns all transcription attempts (latency, tokens, status, model ID, prompt version).
+- `GET /api/v1/workspaces/{workspace_id}/documents/{document_id}/compare`
+  Returns side-by-side comparison records across pages.
+
+---
+
+## 9. Testing
+
+Run all unit and integration tests against local PostgreSQL with rollback transactions:
 
 ```bash
 cd backend
-.venv/bin/pytest -q
-.venv/bin/ruff check app tests
+source .venv/bin/activate
+pytest -v
+ruff check app tests
+```
+
+To run the live opt-in Meta API integration test:
+```bash
+RUN_META_VISION_INTEGRATION=true pytest -v -k test_live_meta_vision_integration
 ```

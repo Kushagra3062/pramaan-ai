@@ -1,9 +1,11 @@
 """
-Deterministic text chunking service.
+Deterministic, word-and-sentence boundary preserving text chunker.
 
-Splits extracted document text into overlapping chunks while preserving
-page provenance and stable ordering.  No embeddings or vector operations
-are performed here.
+Improvements over basic character windowing:
+1. Prefers paragraph breaks, sentence punctuation (. ! ? \n), and whitespace.
+2. Avoids splitting in the middle of words unless forced by chunk_size constraint.
+3. Preserves Malayalam Unicode strings and multi-byte script characters.
+4. Preserves 1-based source page ranges, deterministic ordering, and SHA-256 hashes.
 """
 
 from __future__ import annotations
@@ -36,13 +38,47 @@ class PageText:
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate using whitespace splitting."""
     return len(text.split())
 
 
 def _content_hash(text: str) -> str:
-    """Deterministic SHA-256 hash of chunk content."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _find_clean_boundary(text: str, target_idx: int, min_idx: int) -> int:
+    """
+    Search backwards from target_idx down to min_idx for natural text boundaries:
+    1. Paragraph break (\n\n)
+    2. Line break (\n)
+    3. Sentence terminators (. ! ?) followed by whitespace
+    4. General whitespace (space, tab)
+    Returns target_idx if no boundary is found within the window.
+    """
+    if target_idx >= len(text):
+        return len(text)
+
+    # 1. Look for double newline
+    p_break = text.rfind("\n\n", min_idx, target_idx)
+    if p_break != -1:
+        return p_break + 2
+
+    # 2. Look for single newline
+    n_break = text.rfind("\n", min_idx, target_idx)
+    if n_break != -1:
+        return n_break + 1
+
+    # 3. Look for sentence boundary (. ! ?)
+    for sep in (". ", "! ", "? ", "। ", ".\n"):
+        s_break = text.rfind(sep, min_idx, target_idx)
+        if s_break != -1:
+            return s_break + len(sep)
+
+    # 4. Look for whitespace
+    w_break = text.rfind(" ", min_idx, target_idx)
+    if w_break != -1:
+        return w_break + 1
+
+    return target_idx
 
 
 def chunk_document(
@@ -53,41 +89,15 @@ def chunk_document(
     min_chunk_chars: int = 20,
 ) -> list[ChunkResult]:
     """
-    Split page texts into overlapping character-level chunks.
-
-    The algorithm concatenates all page texts (preserving page boundaries),
-    then produces fixed-size overlapping windows.  Each chunk records which
-    pages contributed to it.
-
-    Parameters
-    ----------
-    pages:
-        Ordered list of page texts (1-based page numbers).
-    chunk_size:
-        Target chunk size in characters.
-    chunk_overlap:
-        Overlap between consecutive chunks in characters.
-    min_chunk_chars:
-        Chunks shorter than this are discarded.
-
-    Returns
-    -------
-    list[ChunkResult]
-        Ordered list of chunks with page provenance.
+    Split document pages into overlapping chunks adhering to natural word and sentence boundaries.
+    Preserves exact 1-based page provenance and deterministic chunk hashes.
     """
     if not pages:
         return []
+
     if chunk_overlap >= chunk_size:
         chunk_overlap = chunk_size // 4
-        logger.warning(
-            "chunk_overlap_clamped",
-            extra={
-                "event": "chunking.overlap_clamped",
-                "new_overlap": chunk_overlap,
-            },
-        )
 
-    # Build a flat text with a mapping from character offset -> page number
     char_to_page: list[int] = []
     full_text_parts: list[str] = []
 
@@ -95,61 +105,70 @@ def chunk_document(
         text = page.text.strip()
         if not text:
             continue
-        # Add a page separator (newline) between pages
         if full_text_parts:
-            full_text_parts.append("\n")
-            char_to_page.append(char_to_page[-1] if char_to_page else page.page_number)
+            full_text_parts.append("\n\n")
+            char_to_page.extend([char_to_page[-1], page.page_number])
         full_text_parts.append(text)
         char_to_page.extend([page.page_number] * len(text))
 
     full_text = "".join(full_text_parts)
-
     if len(full_text.strip()) < min_chunk_chars:
         return []
 
-    # Sliding window chunking
     chunks: list[ChunkResult] = []
-    step = chunk_size - chunk_overlap
     start = 0
     chunk_index = 0
+    text_len = len(full_text)
 
-    while start < len(full_text):
-        end = min(start + chunk_size, len(full_text))
-        chunk_text = full_text[start:end].strip()
+    while start < text_len:
+        # Proposed end
+        ideal_end = min(start + chunk_size, text_len)
 
-        if len(chunk_text) < min_chunk_chars:
+        if ideal_end < text_len:
+            # Find natural word / sentence break within the last 30% of the chunk window
+            search_min = max(start + (chunk_size // 2), start + 50)
+            actual_end = _find_clean_boundary(full_text, ideal_end, search_min)
+        else:
+            actual_end = text_len
+
+        chunk_text = full_text[start:actual_end].strip()
+
+        if len(chunk_text) >= min_chunk_chars:
+            start_idx = min(start, len(char_to_page) - 1)
+            end_idx = min(actual_end - 1, len(char_to_page) - 1)
+            page_start = char_to_page[start_idx]
+            page_end = char_to_page[end_idx]
+
+            chunks.append(
+                ChunkResult(
+                    chunk_index=chunk_index,
+                    content=chunk_text,
+                    page_start=page_start,
+                    page_end=page_end,
+                    token_count=_estimate_tokens(chunk_text),
+                    content_hash=_content_hash(chunk_text),
+                )
+            )
+            chunk_index += 1
+
+        if actual_end >= text_len:
             break
 
-        # Determine page range for this chunk
-        # Clamp to valid indices
-        start_idx = min(start, len(char_to_page) - 1)
-        end_idx = min(end - 1, len(char_to_page) - 1)
-        page_start = char_to_page[start_idx]
-        page_end = char_to_page[end_idx]
+        # Calculate next start position using overlap, adjusted to clean word boundary
+        ideal_next_start = max(start + 1, actual_end - chunk_overlap)
+        actual_next_start = _find_clean_boundary(full_text, ideal_next_start, max(start + 1, ideal_next_start - 50))
 
-        chunks.append(
-            ChunkResult(
-                chunk_index=chunk_index,
-                content=chunk_text,
-                page_start=page_start,
-                page_end=page_end,
-                token_count=_estimate_tokens(chunk_text),
-                content_hash=_content_hash(chunk_text),
-            )
-        )
+        if actual_next_start <= start:
+            actual_next_start = actual_end
 
-        chunk_index += 1
-        start += step
+        start = actual_next_start
 
     logger.info(
-        "chunking_completed",
+        "chunking_boundary_preserved",
         extra={
             "event": "chunking.completed",
-            "total_chars": len(full_text),
+            "total_chars": text_len,
             "chunk_count": len(chunks),
-            "chunk_size": chunk_size,
-            "chunk_overlap": chunk_overlap,
         },
     )
     return chunks
-

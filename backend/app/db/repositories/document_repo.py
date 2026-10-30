@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.repositories.base import BaseRepository
-from app.models.document import Document, DocumentChunk, DocumentPage
+from app.models.document import Document, DocumentChunk, DocumentPage, PageExtractionAttempt
 from app.models.enums import DocumentProcessingStatus
 
 
@@ -205,5 +205,59 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             .order_by(DocumentChunk.created_at.desc())
             .limit(limit)
             .offset(offset)
+        )
+        return list(self.session.scalars(stmt).all())
+
+
+class PageExtractionAttemptRepository(BaseRepository[PageExtractionAttempt]):
+    def __init__(self, session: Session) -> None:
+        super().__init__(session, PageExtractionAttempt)
+
+    def record_attempt(
+        self,
+        document_id: uuid.UUID,
+        document_page_id: uuid.UUID,
+        page_number: int,
+        provider: str,
+        extracted_text: str,
+        status: str,
+        model_id: str | None = None,
+        prompt_version: str | None = None,
+        language_configuration: str | None = None,
+        usage_metadata: dict[str, Any] | None = None,
+        latency_ms: int | None = None,
+        input_hash: str | None = None,
+        error_code: str | None = None,
+    ) -> PageExtractionAttempt:
+        attempt = PageExtractionAttempt(
+            document_id=document_id,
+            document_page_id=document_page_id,
+            page_number=page_number,
+            provider=provider,
+            model_id=model_id,
+            prompt_version=prompt_version,
+            language_configuration=language_configuration,
+            extracted_text=extracted_text,
+            status=status,
+            usage_metadata=usage_metadata or {},
+            latency_ms=latency_ms,
+            input_hash=input_hash,
+            error_code=error_code,
+        )
+        return self.add(attempt)
+
+    def list_by_page(self, document_page_id: uuid.UUID) -> list[PageExtractionAttempt]:
+        stmt = (
+            select(PageExtractionAttempt)
+            .where(PageExtractionAttempt.document_page_id == document_page_id)
+            .order_by(PageExtractionAttempt.created_at.desc())
+        )
+        return list(self.session.scalars(stmt).all())
+
+    def list_by_document(self, document_id: uuid.UUID) -> list[PageExtractionAttempt]:
+        stmt = (
+            select(PageExtractionAttempt)
+            .where(PageExtractionAttempt.document_id == document_id)
+            .order_by(PageExtractionAttempt.page_number.asc(), PageExtractionAttempt.created_at.desc())
         )
         return list(self.session.scalars(stmt).all())

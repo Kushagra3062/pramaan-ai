@@ -38,11 +38,16 @@ class PageOCRResult:
     page_number: int  # 1-based
     recognized_text: str
     char_count: int
-    extraction_method: str  # "OCR" or "MIXED"
+    extraction_method: str  # "OCR", "META_VISION", "MIXED"
     extraction_status: str  # "COMPLETED" or "FAILED"
     languages_used: str
+    provider: str = "tesseract"
     metadata: dict = field(default_factory=dict)
     error_message: str | None = None
+    uncertain_regions: list[dict] = field(default_factory=list)
+    latency_ms: int | None = None
+    model_id: str | None = None
+    input_hash: str | None = None
 
 
 def check_tesseract_installed() -> bool:
@@ -187,6 +192,7 @@ def run_ocr_on_page(
         extraction_method=method,
         extraction_status=status,
         languages_used=languages,
+        provider="tesseract",
         metadata={
             "dpi": dpi,
             "ocr_chars": len(ocr_text),
@@ -236,4 +242,33 @@ def perform_document_ocr(
         doc.close()
 
     return results
+
+
+def render_page_to_image_bytes(
+    doc: pymupdf.Document,
+    page_number: int,
+    dpi: int = 250,
+    max_dim: int = 2048,
+) -> tuple[bytes, str]:
+    """
+    Render a single page to size-controlled PNG image bytes.
+    Clamps max dimension to avoid unbounded memory / payload sizes.
+    """
+    page_idx = page_number - 1
+    page = doc[page_idx]
+
+    # Calculate scale factor
+    zoom = dpi / 72.0
+    mat = pymupdf.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+
+    # If exceeding max_dim, scale down proportionally
+    if max(pix.width, pix.height) > max_dim:
+        scale = max_dim / float(max(pix.width, pix.height))
+        mat = pymupdf.Matrix(zoom * scale, zoom * scale)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+
+    png_bytes = pix.tobytes("png")
+    return png_bytes, "image/png"
+
 

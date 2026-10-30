@@ -1,11 +1,35 @@
+import shutil
+import tempfile
 import uuid
 from collections.abc import Generator
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.db.engine import engine
+from app.db.engine import engine, get_db
+from app.main import app
 from app.models.workspace import User, Workspace
+
+
+@pytest.fixture
+def temp_storage_dir() -> Generator[str, None, None]:
+    """Temporary storage directory for testing documents."""
+    temp_dir = tempfile.mkdtemp(prefix="pramaan_test_storage_")
+    yield temp_dir
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@pytest.fixture
+def client(db_session: Session) -> Generator[TestClient, None, None]:
+    """FastAPI TestClient with db_session overridden."""
+    def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture

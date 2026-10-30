@@ -11,17 +11,13 @@ Covers:
 """
 
 import io
-import shutil
-import tempfile
 import uuid
-from collections.abc import Generator
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.engine import get_db
 from app.db.repositories.document_repo import (
     DocumentChunkRepository,
     DocumentPageRepository,
@@ -36,7 +32,6 @@ from app.ingestion.ocr import (
     validate_ocr_languages,
 )
 from app.ingestion.storage import LocalStorageAdapter
-from app.main import app
 from app.models.enums import DocumentProcessingStatus
 from app.models.workspace import Workspace
 from app.services.document_service import (
@@ -45,25 +40,6 @@ from app.services.document_service import (
     upload_document,
 )
 from tests.helpers import create_synthetic_pdf
-
-
-@pytest.fixture
-def temp_storage_dir() -> Generator[str, None, None]:
-    temp_dir = tempfile.mkdtemp(prefix="pramaan_test_ocr_storage_")
-    yield temp_dir
-    shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-@pytest.fixture
-def client(db_session: Session) -> Generator[TestClient, None, None]:
-    def _override_get_db():
-        yield db_session
-
-    app.dependency_overrides[get_db] = _override_get_db
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
-
 
 # ── 1. OCR Configuration & Language Validation Unit Tests ───────────────────
 
@@ -168,7 +144,7 @@ def test_digital_pdf_does_not_unnecessarily_invoke_ocr(
     assert doc.processing_status == DocumentProcessingStatus.READY.value
 
     # Triggering default OCR on this doc finds 0 pages needing OCR
-    doc, results, regenerated_count = process_document_ocr(
+    doc, results, regenerated_count, mode = process_document_ocr(
         session=db_session,
         settings=settings,
         workspace_id=test_workspace.id,
@@ -176,6 +152,7 @@ def test_digital_pdf_does_not_unnecessarily_invoke_ocr(
     )
     assert len(results) == 0
     assert regenerated_count == 0
+    assert mode == "tesseract"
 
 
 def test_scanned_pdf_is_ocr_processed_and_chunks_regenerated(
@@ -210,7 +187,7 @@ def test_scanned_pdf_is_ocr_processed_and_chunks_regenerated(
 
     monkeypatch.setattr("app.services.document_service.perform_document_ocr", _mock_ocr)
 
-    updated_doc, results, new_chunks_count = process_document_ocr(
+    updated_doc, results, new_chunks_count, _ = process_document_ocr(
         session=db_session,
         settings=settings,
         workspace_id=test_workspace.id,
@@ -270,7 +247,7 @@ def test_multi_page_mixed_pdf_preserves_digital_text(
 
     monkeypatch.setattr("app.services.document_service.perform_document_ocr", _mock_ocr)
 
-    updated_doc, results, chunks_count = process_document_ocr(
+    updated_doc, results, chunks_count, _ = process_document_ocr(
         session=db_session,
         settings=settings,
         workspace_id=test_workspace.id,

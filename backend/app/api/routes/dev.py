@@ -8,8 +8,6 @@ from app.core.config import get_settings
 from app.db.engine import get_db
 from app.db.repositories.workspace_repo import WorkspaceRepository
 from app.services.meta_service import smoke_test_model
-from fastapi import Depends
-from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/internal/dev", tags=["development"])
 logger = logging.getLogger(__name__)

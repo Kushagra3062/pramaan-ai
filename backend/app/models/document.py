@@ -106,6 +106,48 @@ class DocumentPage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Relationships
     document: Mapped["Document"] = relationship("Document", back_populates="pages")
+    extraction_attempts: Mapped[list["PageExtractionAttempt"]] = relationship(
+        "PageExtractionAttempt", back_populates="page", cascade="all, delete-orphan", order_by="PageExtractionAttempt.created_at.desc()"
+    )
+
+
+class PageExtractionAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """
+    Detailed provenance record for each extraction or OCR attempt on a document page.
+    Preserves Tesseract, Meta Vision, or comparison attempts independently.
+    """
+    __tablename__ = "page_extraction_attempts"
+
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    document_page_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_pages.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    page_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)  # tesseract, meta_vision
+    model_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    language_configuration: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    extracted_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(50), nullable=False)  # COMPLETED, FAILED
+    usage_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    __table_args__ = (
+        Index("ix_page_attempts_doc_page", "document_id", "page_number"),
+        Index("ix_page_attempts_page_id", "document_page_id"),
+    )
+
+    # Relationships
+    page: Mapped["DocumentPage"] = relationship("DocumentPage", back_populates="extraction_attempts")
+    document: Mapped["Document"] = relationship("Document")
 
 
 class DocumentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):

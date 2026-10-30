@@ -21,6 +21,7 @@ from app.db.repositories.document_repo import (
     DocumentChunkRepository,
     DocumentPageRepository,
     DocumentRepository,
+    PageExtractionAttemptRepository,
 )
 from app.db.repositories.workspace_repo import WorkspaceRepository
 from app.ingestion.chunking import PageText, chunk_document
@@ -29,11 +30,14 @@ from app.ingestion.extraction import (
     extract_pdf,
     validate_pdf_signature,
 )
+from app.ingestion.meta_vision import MetaVisionExtractor
 from app.ingestion.ocr import (
     PageOCRResult,
     TesseractLanguageNotFoundError,
     TesseractNotFoundError,
     perform_document_ocr,
+    render_page_to_image_bytes,
+    run_ocr_on_page,
 )
 from app.ingestion.storage import LocalStorageAdapter, StorageAdapter, StorageError
 from app.models.document import Document
@@ -315,13 +319,18 @@ def process_document_ocr(
     page_numbers: list[int] | None = None,
     languages: str | None = None,
     dpi: int | None = None,
-) -> tuple[Document, list[PageOCRResult], int]:
+    provider: str | None = None,
+    fallback_to_tesseract: bool | None = None,
+) -> tuple[Document, list[PageOCRResult], int, str]:
     """
-    Run OCR on selected pages of an existing document and regenerate chunks.
+    Run OCR or Vision transcription on selected pages of an existing document.
+    Supports modes:
+      - 'tesseract': Local OCR engine
+      - 'meta_vision': Meta Muse Spark 1.3 Vision transcription (with optional fallback)
+      - 'compare': Runs both Tesseract and Meta Vision, persisting both attempts for inspection
+    """
+    import pymupdf
 
-    Returns:
-        (updated_document, list_of_page_results, chunks_regenerated_count)
-    """
     doc_repo = DocumentRepository(session)
     doc = doc_repo.get_by_id(document_id)
 
@@ -331,11 +340,15 @@ def process_document_ocr(
     page_repo = DocumentPageRepository(session)
     existing_pages = page_repo.list_by_document(document_id)
     if not existing_pages:
-        raise ValidationError("Document has no recorded pages to OCR")
+        raise ValidationError("Document has no recorded pages to process")
 
     page_map = {p.page_number: p for p in existing_pages}
 
-    # Determine pages to OCR
+    selected_mode = (provider or settings.scanned_page_extractor).lower()
+    if selected_mode not in ("tesseract", "meta_vision", "compare"):
+        raise ValidationError(f"Invalid provider mode '{selected_mode}'. Allowed: tesseract, meta_vision, compare")
+
+    # Determine pages
     if page_numbers is not None:
         if not page_numbers:
             raise ValidationError("page_numbers list cannot be empty when provided")
@@ -344,7 +357,7 @@ def process_document_ocr(
                 raise ValidationError(f"Invalid page number {num}; valid range is 1 to {len(existing_pages)}")
         targets = sorted(set(page_numbers))
     else:
-        # Default: all pages marked as NEEDS_OCR or with extraction_status != 'COMPLETED'
+        # Default: all pages marked as NEEDS_OCR or FAILED
         targets = [
             p.page_number
             for p in existing_pages
@@ -352,14 +365,17 @@ def process_document_ocr(
             or p.extraction_method == "needs_ocr"
         ]
         if not targets:
-            # If all are already completed, nothing to do
-            return doc, [], 0
+            if selected_mode in ("meta_vision", "compare"):
+                # In meta_vision or compare mode, default to all pages so user can inspect / compare
+                targets = [p.page_number for p in existing_pages]
+            else:
+                return doc, [], 0, selected_mode
 
     # Limit check
     max_pages = settings.ocr_max_pages_per_request
     if len(targets) > max_pages:
         raise ValidationError(
-            f"Requested {len(targets)} pages for OCR, which exceeds maximum limit of {max_pages}"
+            f"Requested {len(targets)} pages for processing, which exceeds maximum limit of {max_pages}"
         )
 
     # Load stored PDF bytes
@@ -369,107 +385,312 @@ def process_document_ocr(
     except StorageError as exc:
         raise DocumentServiceError(f"Cannot load stored document: {exc}") from exc
 
+    should_fallback = (
+        fallback_to_tesseract
+        if fallback_to_tesseract is not None
+        else settings.meta_vision_fallback_to_tesseract
+    )
+
     selected_langs = languages or settings.ocr_languages
-    selected_dpi = dpi or settings.ocr_dpi
+    selected_dpi = dpi or (settings.meta_vision_dpi if selected_mode == "meta_vision" else settings.ocr_dpi)
 
     existing_texts = {p.page_number: p.extracted_text or "" for p in existing_pages}
+    ocr_results: list[PageOCRResult] = []
+    attempt_repo = PageExtractionAttemptRepository(session)
 
-    try:
-        ocr_results = perform_document_ocr(
-            pdf_bytes,
-            targets,
-            languages=selected_langs,
-            dpi=selected_dpi,
-            existing_pages=existing_texts,
-            tessdata_prefix=settings.tessdata_prefix,
-        )
-    except (TesseractNotFoundError, TesseractLanguageNotFoundError) as exc:
-        raise OCRExecutionError(str(exc)) from exc
-    except Exception as exc:
-        logger.exception(
-            "ocr_processing_failed",
-            extra={
-                "event": "ocr.processing_failed",
-                "document_id": str(document_id),
-                "error": str(exc),
-            },
-        )
-        raise OCRExecutionError(f"OCR failed: {exc}") from exc
+    if selected_mode == "tesseract":
+        try:
+            ocr_results = perform_document_ocr(
+                pdf_bytes,
+                targets,
+                languages=selected_langs,
+                dpi=selected_dpi,
+                existing_pages=existing_texts,
+                tessdata_prefix=settings.tessdata_prefix,
+            )
+        except (TesseractNotFoundError, TesseractLanguageNotFoundError) as exc:
+            raise OCRExecutionError(str(exc)) from exc
+        except Exception as exc:
+            raise OCRExecutionError(f"Tesseract OCR processing failed: {exc}") from exc
+
+        for res in ocr_results:
+            page_obj = page_map[res.page_number]
+            attempt_repo.record_attempt(
+                document_id=doc.id,
+                document_page_id=page_obj.id,
+                page_number=res.page_number,
+                provider="tesseract",
+                extracted_text=res.recognized_text,
+                status=res.extraction_status,
+                language_configuration=selected_langs,
+                usage_metadata=res.metadata,
+                error_code=res.error_message,
+            )
+
+    else:
+        # meta_vision or compare mode
+        try:
+            pdf_doc = pymupdf.open("pdf", pdf_bytes)
+        except Exception as exc:
+            raise OCRExecutionError(f"Cannot open PDF: {exc}") from exc
+
+        try:
+            meta_extractor = MetaVisionExtractor(settings)
+
+            for page_num in targets:
+                existing_text = existing_texts.get(page_num, "")
+                page_obj = page_map[page_num]
+
+                if selected_mode == "meta_vision":
+                    png_bytes, mime_type = render_page_to_image_bytes(
+                        pdf_doc,
+                        page_num,
+                        dpi=selected_dpi,
+                        max_dim=settings.meta_vision_max_image_dim,
+                    )
+                    vision_res = meta_extractor.transcribe_image_bytes(png_bytes, mime_type=mime_type)
+
+                    if vision_res.status == "COMPLETED" and vision_res.transcription:
+                        clean_transcription = vision_res.transcription
+                        if (
+                            page_obj.extraction_method == "DIGITAL_TEXT"
+                            and existing_text.strip()
+                            and "[MUSE SPARK VISION]:" not in existing_text
+                            and existing_text not in clean_transcription
+                        ):
+                            combined_text = f"{existing_text}\n\n[MUSE SPARK VISION]:\n{clean_transcription}"
+                            method = "MIXED"
+                        else:
+                            combined_text = clean_transcription
+                            method = "META_VISION"
+
+                        res = PageOCRResult(
+                            page_number=page_num,
+                            recognized_text=combined_text,
+                            char_count=len(combined_text),
+                            extraction_method=method,
+                            extraction_status="COMPLETED",
+                            languages_used="+".join(vision_res.language_hints) or "auto",
+                            provider="meta_vision",
+                            metadata={
+                                "model": vision_res.model_id,
+                                "prompt_version": vision_res.prompt_version,
+                                "uncertain_count": len(vision_res.uncertain_regions),
+                            },
+                            uncertain_regions=vision_res.uncertain_regions,
+                            latency_ms=vision_res.latency_ms,
+                            model_id=vision_res.model_id,
+                            input_hash=vision_res.input_hash,
+                        )
+                        ocr_results.append(res)
+
+                        attempt_repo.record_attempt(
+                            document_id=doc.id,
+                            document_page_id=page_obj.id,
+                            page_number=page_num,
+                            provider="meta_vision",
+                            model_id=vision_res.model_id,
+                            prompt_version=vision_res.prompt_version,
+                            language_configuration="+".join(vision_res.language_hints),
+                            extracted_text=clean_transcription,
+                            status="COMPLETED",
+                            usage_metadata=vision_res.usage_metadata,
+                            latency_ms=vision_res.latency_ms,
+                            input_hash=vision_res.input_hash,
+                        )
+                    else:
+                        # Vision failed
+                        attempt_repo.record_attempt(
+                            document_id=doc.id,
+                            document_page_id=page_obj.id,
+                            page_number=page_num,
+                            provider="meta_vision",
+                            model_id=vision_res.model_id,
+                            prompt_version=vision_res.prompt_version,
+                            extracted_text="",
+                            status="FAILED",
+                            latency_ms=vision_res.latency_ms,
+                            input_hash=vision_res.input_hash,
+                            error_code=vision_res.error_code or "EmptyOutput",
+                        )
+
+                        if should_fallback:
+                            logger.warning(
+                                "meta_vision_fallback_to_tesseract",
+                                extra={"event": "ocr.fallback", "page_number": page_num},
+                            )
+                            tess_res = run_ocr_on_page(
+                                pdf_doc,
+                                page_num,
+                                languages=selected_langs,
+                                dpi=selected_dpi,
+                                existing_digital_text=existing_text,
+                                tessdata_prefix=settings.tessdata_prefix,
+                            )
+                            tess_res.metadata["fallback_from"] = "meta_vision"
+                            ocr_results.append(tess_res)
+
+                            attempt_repo.record_attempt(
+                                document_id=doc.id,
+                                document_page_id=page_obj.id,
+                                page_number=page_num,
+                                provider="tesseract",
+                                extracted_text=tess_res.recognized_text,
+                                status=tess_res.extraction_status,
+                                language_configuration=selected_langs,
+                                usage_metadata=tess_res.metadata,
+                                error_code=tess_res.error_message,
+                            )
+                        else:
+                            ocr_results.append(
+                                PageOCRResult(
+                                    page_number=page_num,
+                                    recognized_text="",
+                                    char_count=0,
+                                    extraction_method="META_VISION",
+                                    extraction_status="FAILED",
+                                    languages_used="auto",
+                                    provider="meta_vision",
+                                    error_message=vision_res.error_message or "Meta Vision transcription failed",
+                                )
+                            )
+
+                elif selected_mode == "compare":
+                    # Run BOTH Tesseract and Meta Vision
+                    # 1. Tesseract
+                    tess_res = run_ocr_on_page(
+                        pdf_doc,
+                        page_num,
+                        languages=selected_langs,
+                        dpi=selected_dpi,
+                        existing_digital_text=existing_text,
+                        tessdata_prefix=settings.tessdata_prefix,
+                    )
+                    attempt_repo.record_attempt(
+                        document_id=doc.id,
+                        document_page_id=page_obj.id,
+                        page_number=page_num,
+                        provider="tesseract",
+                        extracted_text=tess_res.recognized_text,
+                        status=tess_res.extraction_status,
+                        language_configuration=selected_langs,
+                        usage_metadata=tess_res.metadata,
+                        error_code=tess_res.error_message,
+                    )
+
+                    # 2. Meta Vision
+                    png_bytes, mime_type = render_page_to_image_bytes(
+                        pdf_doc,
+                        page_num,
+                        dpi=selected_dpi,
+                        max_dim=settings.meta_vision_max_image_dim,
+                    )
+                    vision_res = meta_extractor.transcribe_image_bytes(png_bytes, mime_type=mime_type)
+
+                    attempt_repo.record_attempt(
+                        document_id=doc.id,
+                        document_page_id=page_obj.id,
+                        page_number=page_num,
+                        provider="meta_vision",
+                        model_id=vision_res.model_id,
+                        prompt_version=vision_res.prompt_version,
+                        language_configuration="+".join(vision_res.language_hints),
+                        extracted_text=vision_res.transcription,
+                        status=vision_res.status,
+                        usage_metadata=vision_res.usage_metadata,
+                        latency_ms=vision_res.latency_ms,
+                        input_hash=vision_res.input_hash,
+                        error_code=vision_res.error_code,
+                    )
+
+                    # In COMPARE mode: Canonical text is preserved as Tesseract (or original) by default
+                    ocr_results.append(tess_res)
+
+        finally:
+            pdf_doc.close()
 
     # Update database transactionally
     try:
-        # Update each page
-        for res in ocr_results:
-            page = page_map[res.page_number]
-            page.extracted_text = res.recognized_text
-            page.extraction_method = res.extraction_method
-            page.extraction_status = res.extraction_status
+        if selected_mode != "compare":
+            for res in ocr_results:
+                page = page_map[res.page_number]
+                if res.extraction_status == "COMPLETED":
+                    page.extracted_text = res.recognized_text
+                    page.extraction_method = res.extraction_method
+                    page.extraction_status = res.extraction_status
+                else:
+                    page.extraction_status = res.extraction_status
 
-            meta = dict(page.page_metadata or {})
-            meta.update(res.metadata)
-            meta["ocr_languages"] = res.languages_used
-            if res.error_message:
-                meta["ocr_error"] = res.error_message
-            page.page_metadata = meta
+                meta = dict(page.page_metadata or {})
+                meta.update(res.metadata)
+                meta["extraction_provider"] = res.provider
+                if res.error_message:
+                    meta["ocr_error"] = res.error_message
+                page.page_metadata = meta
 
-        session.flush()
+            session.flush()
 
-        # Regenerate all chunks for the document to guarantee consistent chunk index & boundaries
-        chunk_repo = DocumentChunkRepository(session)
-        chunk_repo.delete_by_document(document_id)
+            # Regenerate chunks using boundary-preserving chunker
+            chunk_repo = DocumentChunkRepository(session)
+            chunk_repo.delete_by_document(document_id)
 
-        all_pages_now = page_repo.list_by_document(document_id)
-        pages_with_text = [
-            PageText(page_number=p.page_number, text=p.extracted_text)
-            for p in all_pages_now
-            if p.extracted_text and len(p.extracted_text.strip()) >= settings.min_text_density_chars
-        ]
+            all_pages_now = page_repo.list_by_document(document_id)
+            pages_with_text = [
+                PageText(page_number=p.page_number, text=p.extracted_text)
+                for p in all_pages_now
+                if p.extracted_text and len(p.extracted_text.strip()) >= settings.min_text_density_chars
+            ]
 
-        new_chunks = chunk_document(
-            pages_with_text,
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-        )
-
-        for chunk in new_chunks:
-            chunk_repo.create(
-                workspace_id=workspace_id,
-                document_id=document_id,
-                page_start=chunk.page_start,
-                page_end=chunk.page_end,
-                chunk_index=chunk.chunk_index,
-                content=chunk.content,
-                embedding_model=settings.embedding_model_name,
-                embedding_version=settings.embedding_version,
-                content_hash=chunk.content_hash,
-                token_count=chunk.token_count,
+            new_chunks = chunk_document(
+                pages_with_text,
+                chunk_size=settings.chunk_size,
+                chunk_overlap=settings.chunk_overlap,
             )
 
-        # Re-assess document status
-        any_needs_ocr = any(p.extraction_status == "NEEDS_OCR" for p in all_pages_now)
-        any_failed = any(p.extraction_status == "FAILED" for p in all_pages_now)
+            for chunk in new_chunks:
+                chunk_repo.create(
+                    workspace_id=workspace_id,
+                    document_id=document_id,
+                    page_start=chunk.page_start,
+                    page_end=chunk.page_end,
+                    chunk_index=chunk.chunk_index,
+                    content=chunk.content,
+                    embedding_model=settings.embedding_model_name,
+                    embedding_version=settings.embedding_version,
+                    content_hash=chunk.content_hash,
+                    token_count=chunk.token_count,
+                )
 
-        if any_failed:
-            doc.processing_status = DocumentProcessingStatus.FAILED.value
-        elif any_needs_ocr:
-            doc.processing_status = DocumentProcessingStatus.NEEDS_OCR.value
+            # Re-assess document status
+            any_needs_ocr = any(p.extraction_status == "NEEDS_OCR" for p in all_pages_now)
+            any_failed = any(p.extraction_status == "FAILED" for p in all_pages_now)
+
+            if any_failed:
+                doc.processing_status = DocumentProcessingStatus.FAILED.value
+            elif any_needs_ocr:
+                doc.processing_status = DocumentProcessingStatus.NEEDS_OCR.value
+            else:
+                doc.processing_status = DocumentProcessingStatus.READY.value
+
+            new_chunk_count = len(new_chunks)
         else:
-            doc.processing_status = DocumentProcessingStatus.READY.value
+            # Compare mode: chunks are not replaced; both attempts are recorded in attempts table
+            chunk_repo = DocumentChunkRepository(session)
+            new_chunk_count = len(chunk_repo.list_by_document(document_id))
 
         session.flush()
         session.commit()
 
         logger.info(
-            "document_ocr_completed",
+            "document_processing_finished",
             extra={
-                "event": "document.ocr_completed",
+                "event": "document.processing_finished",
                 "document_id": str(document_id),
-                "pages_ocr": len(ocr_results),
-                "new_chunks_count": len(new_chunks),
-                "final_status": doc.processing_status,
+                "mode": selected_mode,
+                "pages_processed": len(ocr_results),
             },
         )
-        return doc, ocr_results, len(new_chunks)
+        return doc, ocr_results, new_chunk_count, selected_mode
 
     except Exception:
         session.rollback()

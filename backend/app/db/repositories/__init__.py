@@ -9,6 +9,7 @@ from app.db.repositories.document_repo import (
     DocumentChunkRepository,
     DocumentPageRepository,
     DocumentRepository,
+    PageExtractionAttemptRepository,
 )
 from app.db.repositories.fact_repo import FactRepository, RequirementRepository
 from app.db.repositories.governance_repo import ActionRepository, ConflictRepository
@@ -22,6 +23,7 @@ __all__ = [
     "DocumentRepository",
     "DocumentPageRepository",
     "DocumentChunkRepository",
+    "PageExtractionAttemptRepository",
     "FactRepository",
     "RequirementRepository",
     "GraphRepository",

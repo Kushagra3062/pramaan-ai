@@ -103,11 +103,11 @@ class DuplicateDocumentResponse(BaseModel):
 
 
 class OCRRequest(BaseModel):
-    """Optional parameters when triggering OCR on a document."""
+    """Parameters when triggering OCR or Vision transcription on a document."""
 
     page_numbers: list[int] | None = Field(
         default=None,
-        description="Optional explicit 1-based page numbers to OCR. Defaults to all pages needing OCR.",
+        description="Optional explicit 1-based page numbers to process. Defaults to all pages needing OCR.",
     )
     languages: str | None = Field(
         default=None,
@@ -119,26 +119,66 @@ class OCRRequest(BaseModel):
         le=600,
         description="Optional rendering DPI override.",
     )
+    provider: str | None = Field(
+        default=None,
+        description="Provider mode: 'tesseract', 'meta_vision', or 'compare'. Defaults to server setting.",
+    )
+    fallback_to_tesseract: bool | None = Field(
+        default=None,
+        description="When using meta_vision, whether to fallback to Tesseract on API failure.",
+    )
+
+
+class PageExtractionAttemptResponse(BaseModel):
+    """Individual extraction attempt record for a page."""
+
+    id: uuid.UUID
+    page_number: int
+    provider: str
+    model_id: str | None = None
+    prompt_version: str | None = None
+    language_configuration: str | None = None
+    extracted_text: str
+    status: str
+    latency_ms: int | None = None
+    usage_metadata: dict[str, Any] = Field(default_factory=dict)
+    error_code: str | None = None
+    created_at: datetime
+
+
+class PageComparisonResponse(BaseModel):
+    """Comparison of extraction results from different providers for a page."""
+
+    page_number: int
+    canonical_method: str
+    canonical_text: str
+    tesseract_attempt: PageExtractionAttemptResponse | None = None
+    meta_vision_attempt: PageExtractionAttemptResponse | None = None
 
 
 class PageOCRResponse(BaseModel):
-    """Result of OCR processing for an individual page."""
+    """Result of OCR/Vision processing for an individual page."""
 
     page_number: int
     char_count: int
     extraction_method: str
     extraction_status: str
     languages_used: str
+    provider: str = "tesseract"
     error_message: str | None = None
+    uncertain_regions: list[dict[str, Any]] = Field(default_factory=list)
+    latency_ms: int | None = None
 
 
 class OCRResponse(BaseModel):
-    """Response returned after running OCR on a document."""
+    """Response returned after running OCR/Vision on a document."""
 
     document_id: uuid.UUID
     processing_status: str
+    provider_mode: str
     pages_processed: int
     chunks_regenerated: int
     results: list[PageOCRResponse]
+    comparisons: list[PageComparisonResponse] = Field(default_factory=list)
     message: str
 

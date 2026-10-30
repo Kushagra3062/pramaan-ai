@@ -26,6 +26,12 @@ class DocumentProcessingStatus(StrEnum):
     DELETED = "DELETED"
 
 
+class ExtractionProvider(StrEnum):
+    TESSERACT = "tesseract"
+    META_VISION = "meta_vision"
+    COMPARE = "compare"
+
+
 class FactType(StrEnum):
     DATE = "DATE"
     AMOUNT = "AMOUNT"

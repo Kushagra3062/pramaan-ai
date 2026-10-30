@@ -18,6 +18,7 @@ from app.db.repositories.document_repo import (
     DocumentChunkRepository,
     DocumentPageRepository,
     DocumentRepository,
+    PageExtractionAttemptRepository,
 )
 from app.schemas.document import (
     DocumentChunkResponse,
@@ -27,6 +28,8 @@ from app.schemas.document import (
     DuplicateDocumentResponse,
     OCRRequest,
     OCRResponse,
+    PageComparisonResponse,
+    PageExtractionAttemptResponse,
     PageOCRResponse,
     PaginatedChunksResponse,
     PaginatedDocumentsResponse,
@@ -223,7 +226,48 @@ def get_document_chunks(
     )
 
 
-# ── Trigger OCR ──────────────────────────────────────────────────────────────
+# ── Trigger OCR / Vision ──────────────────────────────────────────────────────
+
+
+def _build_comparisons(
+    pages: list,
+    attempts: list,
+) -> list[PageComparisonResponse]:
+    """Helper to group extraction attempts by page into comparison records."""
+    attempts_by_page: dict[int, dict[str, PageExtractionAttemptResponse]] = {}
+    for att in sorted(attempts, key=lambda a: a.created_at):
+        att_resp = PageExtractionAttemptResponse(
+            id=att.id,
+            page_number=att.page_number,
+            provider=att.provider,
+            model_id=att.model_id,
+            prompt_version=att.prompt_version,
+            language_configuration=att.language_configuration,
+            extracted_text=att.extracted_text,
+            status=att.status,
+            latency_ms=att.latency_ms,
+            usage_metadata=att.usage_metadata or {},
+            error_code=att.error_code,
+            created_at=att.created_at,
+        )
+        if att.page_number not in attempts_by_page:
+            attempts_by_page[att.page_number] = {}
+        # Keep latest attempt per provider for this page
+        attempts_by_page[att.page_number][att.provider] = att_resp
+
+    comparisons: list[PageComparisonResponse] = []
+    for p in sorted(pages, key=lambda p: p.page_number):
+        page_attempts = attempts_by_page.get(p.page_number, {})
+        comparisons.append(
+            PageComparisonResponse(
+                page_number=p.page_number,
+                canonical_method=p.extraction_method,
+                canonical_text=p.extracted_text or "",
+                tesseract_attempt=page_attempts.get("tesseract"),
+                meta_vision_attempt=page_attempts.get("meta_vision"),
+            )
+        )
+    return comparisons
 
 
 @router.post("/{document_id}/ocr", response_model=OCRResponse)
@@ -235,14 +279,15 @@ def trigger_ocr(
     settings: Settings = Depends(get_settings),
 ):
     """
-    Trigger OCR processing on selected pages of a document.
+    Trigger OCR or Vision processing on selected pages of a document.
 
     If page_numbers is not provided, defaults to all pages needing OCR.
+    Supports provider: 'tesseract', 'meta_vision', or 'compare'.
     """
     req = request or OCRRequest()
 
     try:
-        doc, results, regenerated_count = process_document_ocr(
+        doc, results, regenerated_count, provider_mode = process_document_ocr(
             session=session,
             settings=settings,
             workspace_id=workspace_id,
@@ -250,6 +295,8 @@ def trigger_ocr(
             page_numbers=req.page_numbers,
             languages=req.languages,
             dpi=req.dpi,
+            provider=req.provider,
+            fallback_to_tesseract=req.fallback_to_tesseract,
         )
     except DocumentNotFoundError:
         raise HTTPException(
@@ -280,9 +327,18 @@ def trigger_ocr(
             detail="OCR processing failed unexpectedly.",
         ) from None
 
+    comparisons: list[PageComparisonResponse] = []
+    if provider_mode == "compare":
+        page_repo = DocumentPageRepository(session)
+        attempt_repo = PageExtractionAttemptRepository(session)
+        pages = page_repo.list_by_document(document_id)
+        attempts = attempt_repo.list_by_document(document_id)
+        comparisons = _build_comparisons(pages, attempts)
+
     return OCRResponse(
         document_id=doc.id,
         processing_status=doc.processing_status,
+        provider_mode=provider_mode,
         pages_processed=len(results),
         chunks_regenerated=regenerated_count,
         results=[
@@ -292,11 +348,75 @@ def trigger_ocr(
                 extraction_method=r.extraction_method,
                 extraction_status=r.extraction_status,
                 languages_used=r.languages_used,
+                provider=r.provider,
                 error_message=r.error_message,
+                uncertain_regions=r.uncertain_regions,
+                latency_ms=r.latency_ms,
             )
             for r in results
         ],
+        comparisons=comparisons,
         message="OCR processing completed.",
     )
+
+
+# ── Extraction Attempts & Comparison ─────────────────────────────────────────
+
+
+@router.get("/{document_id}/extraction-attempts", response_model=list[PageExtractionAttemptResponse])
+def get_extraction_attempts(
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+    page_number: int | None = None,
+    session: Session = Depends(get_db),
+):
+    """Retrieve extraction attempts for a document or specific page."""
+    doc_repo = DocumentRepository(session)
+    doc = doc_repo.get_by_id(document_id)
+    if doc is None or doc.workspace_id != workspace_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    attempt_repo = PageExtractionAttemptRepository(session)
+    attempts = attempt_repo.list_by_document(document_id)
+    if page_number is not None:
+        attempts = [a for a in attempts if a.page_number == page_number]
+
+    return [
+        PageExtractionAttemptResponse(
+            id=a.id,
+            page_number=a.page_number,
+            provider=a.provider,
+            model_id=a.model_id,
+            prompt_version=a.prompt_version,
+            language_configuration=a.language_configuration,
+            extracted_text=a.extracted_text,
+            status=a.status,
+            latency_ms=a.latency_ms,
+            usage_metadata=a.usage_metadata or {},
+            error_code=a.error_code,
+            created_at=a.created_at,
+        )
+        for a in attempts
+    ]
+
+
+@router.get("/{document_id}/compare", response_model=list[PageComparisonResponse])
+def get_document_comparison(
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+    session: Session = Depends(get_db),
+):
+    """Retrieve side-by-side comparison of extraction providers across pages."""
+    doc_repo = DocumentRepository(session)
+    doc = doc_repo.get_by_id(document_id)
+    if doc is None or doc.workspace_id != workspace_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    page_repo = DocumentPageRepository(session)
+    attempt_repo = PageExtractionAttemptRepository(session)
+    pages = page_repo.list_by_document(document_id)
+    attempts = attempt_repo.list_by_document(document_id)
+
+    return _build_comparisons(pages, attempts)
 
 

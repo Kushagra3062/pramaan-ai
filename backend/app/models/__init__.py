@@ -1,6 +1,6 @@
 from app.models.audit_eval import AuditEvent, EvaluationCase, EvaluationRun, ModelUsage
 from app.models.base import Base, FullTimestampMixin, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.document import Document, DocumentChunk, DocumentPage
+from app.models.document import Document, DocumentChunk, DocumentPage, PageExtractionAttempt
 from app.models.enums import (
     ActionPriority,
     ActionStatus,
@@ -67,6 +67,8 @@ __all__ = [
     "Document",
     "DocumentPage",
     "DocumentChunk",
+    "PageExtractionAttempt",
+    "ExtractionProvider",
     # Facts & Requirements
     "ExtractedFact",
     "Requirement",
