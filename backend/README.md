@@ -142,7 +142,53 @@ erDiagram
 
 ---
 
-## 6. Testing
+## 6. Document Ingestion Pipeline (Milestone 2)
+
+### Ingestion Flow
+1. **Upload & Validation**: Multipart PDF upload checks extension (`.pdf`), content type (`application/pdf`), `%PDF` magic bytes, and configured file size limit (`MAX_UPLOAD_MB`).
+2. **Deduplication**: Streaming SHA-256 computation checks `(workspace_id, sha256)` to prevent duplicate ingestion within a workspace.
+3. **Private Storage**: Stored via `LocalStorageAdapter` at `<document_storage_dir>/<workspace_id>/<document_id>.pdf` outside public static web roots.
+4. **Extraction**: Native PDF text extraction using PyMuPDF (`pymupdf`), preserving 1-based page numbers. Pages below text density threshold (`min_text_density_chars=30`) are detected and tagged with status `NEEDS_OCR`.
+5. **Deterministic Chunking**: Text from readable pages is converted into overlapping windows (default 1000 chars, 200 char overlap) recording exact page provenance (`page_start`, `page_end`, `chunk_index`, `content_hash`).
+6. **Persistence & Cleanup**: Stored in a single transactional unit; any unhandled database failure triggers compensating deletion of the stored file.
+
+### API Endpoints
+
+All endpoints are workspace-scoped under `/api/v1/workspaces/{workspace_id}/documents`:
+
+- `POST /api/v1/workspaces/{workspace_id}/documents`: Upload a PDF file.
+- `GET /api/v1/workspaces/{workspace_id}/documents`: List workspace documents with optional pagination and status filter.
+- `GET /api/v1/workspaces/{workspace_id}/documents/{document_id}`: Retrieve document metadata and processing status.
+- `GET /api/v1/workspaces/{workspace_id}/documents/{document_id}/pages`: Retrieve extracted pages with status and metadata.
+- `GET /api/v1/workspaces/{workspace_id}/documents/{document_id}/chunks`: Retrieve chunks with page provenance.
+
+### Example cURL Commands
+
+```bash
+# Set workspace ID
+WORKSPACE_ID="<your-workspace-uuid>"
+
+# 1. Upload a PDF
+curl -X POST "http://127.0.0.1:8000/api/v1/workspaces/${WORKSPACE_ID}/documents" \
+  -H "Accept: application/json" \
+  -F "file=@/path/to/circular.pdf;type=application/pdf"
+
+# Response:
+# {"id":"c0a80123-...","processing_status":"READY","message":"Document uploaded and processing started."}
+
+# 2. Get document status & metadata
+curl -X GET "http://127.0.0.1:8000/api/v1/workspaces/${WORKSPACE_ID}/documents/<document_id>"
+
+# 3. Retrieve extracted pages
+curl -X GET "http://127.0.0.1:8000/api/v1/workspaces/${WORKSPACE_ID}/documents/<document_id>/pages"
+
+# 4. Retrieve document chunks
+curl -X GET "http://127.0.0.1:8000/api/v1/workspaces/${WORKSPACE_ID}/documents/<document_id>/chunks"
+```
+
+---
+
+## 7. Testing
 
 Run tests against local PostgreSQL with rollback transactions:
 

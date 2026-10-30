@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     max_model_calls_per_request: int = Field(default=4, ge=1, le=10)
     daily_model_call_limit: int = Field(default=20, ge=1, le=1000)
 
+    # Document storage
+    document_storage_dir: str = "../uploads"
+    min_text_density_chars: int = Field(default=30, ge=5, le=500)
+
+    # Chunking configuration
+    chunk_size: int = Field(default=1000, ge=100, le=10000)
+    chunk_overlap: int = Field(default=200, ge=0, le=2000)
+
     # Embedding configuration
     embedding_model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     embedding_dimension: int = Field(default=384, ge=64, le=4096)

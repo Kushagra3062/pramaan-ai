@@ -63,7 +63,7 @@ class Document(Base, UUIDPrimaryKeyMixin, FullTimestampMixin):
     __table_args__ = (
         UniqueConstraint("workspace_id", "sha256", name="uq_documents_workspace_sha256"),
         CheckConstraint(
-            f"processing_status IN ('{DocumentProcessingStatus.UPLOADED.value}', '{DocumentProcessingStatus.VALIDATING.value}', '{DocumentProcessingStatus.PROCESSING.value}', '{DocumentProcessingStatus.READY.value}', '{DocumentProcessingStatus.FAILED.value}', '{DocumentProcessingStatus.DELETING.value}', '{DocumentProcessingStatus.DELETED.value}')",
+            f"processing_status IN ('{DocumentProcessingStatus.UPLOADED.value}', '{DocumentProcessingStatus.VALIDATING.value}', '{DocumentProcessingStatus.PROCESSING.value}', '{DocumentProcessingStatus.NEEDS_OCR.value}', '{DocumentProcessingStatus.READY.value}', '{DocumentProcessingStatus.FAILED.value}', '{DocumentProcessingStatus.DELETING.value}', '{DocumentProcessingStatus.DELETED.value}')",
             name="ck_documents_processing_status_valid",
         ),
         Index("ix_documents_workspace_created", "workspace_id", text("created_at DESC")),
@@ -93,7 +93,7 @@ class DocumentPage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=False,
     )
     page_number: Mapped[int] = mapped_column(Integer, nullable=False)
-    extracted_text: Mapped[str] = mapped_column(Text, nullable=False)
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
     extraction_method: Mapped[str] = mapped_column(String(50), nullable=False)
     extraction_status: Mapped[str] = mapped_column(String(50), nullable=False, default="COMPLETED")
     page_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)

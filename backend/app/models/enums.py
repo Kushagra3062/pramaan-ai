@@ -19,6 +19,7 @@ class DocumentProcessingStatus(StrEnum):
     UPLOADED = "UPLOADED"
     VALIDATING = "VALIDATING"
     PROCESSING = "PROCESSING"
+    NEEDS_OCR = "NEEDS_OCR"
     READY = "READY"
     FAILED = "FAILED"
     DELETING = "DELETING"

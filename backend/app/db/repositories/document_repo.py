@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.repositories.base import BaseRepository
@@ -67,6 +67,19 @@ class DocumentRepository(BaseRepository[Document]):
             stmt = stmt.where(Document.deleted_at.is_(None))
         stmt = stmt.order_by(Document.created_at.desc()).limit(limit).offset(offset)
         return list(self.session.scalars(stmt).all())
+
+    def count_by_workspace(
+        self,
+        workspace_id: uuid.UUID,
+        status: str | None = None,
+        include_deleted: bool = False,
+    ) -> int:
+        stmt = select(func.count(Document.id)).where(Document.workspace_id == workspace_id)
+        if status:
+            stmt = stmt.where(Document.processing_status == status)
+        if not include_deleted:
+            stmt = stmt.where(Document.deleted_at.is_(None))
+        return self.session.scalar(stmt) or 0
 
     def update_status(
         self,
