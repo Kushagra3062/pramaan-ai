@@ -1,0 +1,168 @@
+from enum import StrEnum
+
+
+class UserStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    SUSPENDED = "SUSPENDED"
+    PENDING = "PENDING"
+
+
+class WorkspaceRole(StrEnum):
+    OWNER = "OWNER"
+    ADMIN = "ADMIN"
+    EDITOR = "EDITOR"
+    REVIEWER = "REVIEWER"
+    VIEWER = "VIEWER"
+
+
+class DocumentProcessingStatus(StrEnum):
+    UPLOADED = "UPLOADED"
+    VALIDATING = "VALIDATING"
+    PROCESSING = "PROCESSING"
+    READY = "READY"
+    FAILED = "FAILED"
+    DELETING = "DELETING"
+    DELETED = "DELETED"
+
+
+class FactType(StrEnum):
+    DATE = "DATE"
+    AMOUNT = "AMOUNT"
+    CURRENCY = "CURRENCY"
+    OBLIGATION = "OBLIGATION"
+    DEADLINE = "DEADLINE"
+    APPROVAL_CONDITION = "APPROVAL_CONDITION"
+    IDENTIFIER = "IDENTIFIER"
+    RESPONSIBLE_DEPARTMENT = "RESPONSIBLE_DEPARTMENT"
+
+
+class VerificationStatus(StrEnum):
+    UNVERIFIED = "UNVERIFIED"
+    VERIFIED = "VERIFIED"
+    REJECTED = "REJECTED"
+
+
+class RequirementStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    SUPERSEDED = "SUPERSEDED"
+    INACTIVE = "INACTIVE"
+    DRAFT = "DRAFT"
+
+
+class GraphNodeType(StrEnum):
+    DOCUMENT = "DOCUMENT"
+    FACT = "FACT"
+    REQUIREMENT = "REQUIREMENT"
+    CONFLICT = "CONFLICT"
+    ACTION = "ACTION"
+
+
+class GraphRelationshipType(StrEnum):
+    DERIVED_FROM = "DERIVED_FROM"
+    SUPPORTED_BY = "SUPPORTED_BY"
+    CONTRADICTS = "CONTRADICTS"
+    SUPERSEDES = "SUPERSEDES"
+    AFFECTS = "AFFECTS"
+    ASSIGNED_TO = "ASSIGNED_TO"
+
+
+class GraphProvenanceType(StrEnum):
+    DETERMINISTIC = "DETERMINISTIC"
+    MODEL_PROPOSED = "MODEL_PROPOSED"
+    HUMAN_CONFIRMED = "HUMAN_CONFIRMED"
+
+
+class GraphEdgeStatus(StrEnum):
+    CANDIDATE = "CANDIDATE"
+    VERIFIED = "VERIFIED"
+    REJECTED = "REJECTED"
+
+
+class EvidenceRelationshipType(StrEnum):
+    SUPPORTS = "SUPPORTS"
+    REFUTES = "REFUTES"
+    CONTEXT = "CONTEXT"
+
+
+class AnalysisStatus(StrEnum):
+    CREATED = "CREATED"
+    AUTHORIZED = "AUTHORIZED"
+    RETRIEVING = "RETRIEVING"
+    REASONING = "REASONING"
+    VERIFYING = "VERIFYING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    ABORTED = "ABORTED"
+
+
+class ClaimSupportStatus(StrEnum):
+    SUPPORTED = "SUPPORTED"
+    PARTIALLY_SUPPORTED = "PARTIALLY_SUPPORTED"
+    CONTRADICTED = "CONTRADICTED"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
+class EvidenceRole(StrEnum):
+    PRIMARY = "PRIMARY"
+    SUPPORTING = "SUPPORTING"
+    CONTRADICTING = "CONTRADICTING"
+
+
+class ConflictType(StrEnum):
+    DIRECT_CONTRADICTION = "DIRECT_CONTRADICTION"
+    NUMERIC_MISMATCH = "NUMERIC_MISMATCH"
+    DEADLINE_MISMATCH = "DEADLINE_MISMATCH"
+    RESPONSIBILITY_OVERLAP = "RESPONSIBILITY_OVERLAP"
+    SCOPE_DISCREPANCY = "SCOPE_DISCREPANCY"
+
+
+class ConflictSeverity(StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+class ConflictStatus(StrEnum):
+    OPEN = "OPEN"
+    IN_REVIEW = "IN_REVIEW"
+    RESOLVED = "RESOLVED"
+    DISMISSED = "DISMISSED"
+
+
+class ActionPriority(StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    URGENT = "URGENT"
+
+
+class ActionStatus(StrEnum):
+    PROPOSED = "PROPOSED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+class ModelUsageStatus(StrEnum):
+    SUCCESS = "SUCCESS"
+    ERROR = "ERROR"
+    RATE_LIMITED = "RATE_LIMITED"
+
+
+class EvaluationRunStatus(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class EvaluationCaseStatus(StrEnum):
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+    ERROR = "ERROR"
+

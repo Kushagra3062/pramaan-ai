@@ -22,11 +22,17 @@ class Settings(BaseSettings):
     langfuse_secret_key: str | None = None
     langfuse_base_url: str = "https://cloud.langfuse.com"
 
+    # Safety / demo bounds
     max_upload_mb: int = Field(default=10, ge=1, le=50)
     max_pdf_pages: int = Field(default=20, ge=1, le=100)
     max_agent_steps: int = Field(default=3, ge=1, le=5)
     max_model_calls_per_request: int = Field(default=4, ge=1, le=10)
     daily_model_call_limit: int = Field(default=20, ge=1, le=1000)
+
+    # Embedding configuration
+    embedding_model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    embedding_dimension: int = Field(default=384, ge=64, le=4096)
+    embedding_version: str = "1.0.0"
 
     model_config = SettingsConfigDict(
         env_file="../.env",
