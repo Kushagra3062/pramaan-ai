@@ -1,13 +1,29 @@
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
+from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.db.engine import get_db
+from app.db.repositories.workspace_repo import WorkspaceRepository
 from app.services.meta_service import smoke_test_model
+from fastapi import Depends
+from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/internal/dev", tags=["development"])
 logger = logging.getLogger(__name__)
+
+
+@router.get("/workspace-default")
+def get_default_test_workspace(session: Session = Depends(get_db)) -> dict[str, str]:
+    """Get or create a default testing workspace for development and frontend test suite."""
+    repo = WorkspaceRepository(session)
+    ws = repo.get_by_slug("default-test-workspace")
+    if not ws:
+        ws = repo.create(name="Default Test Workspace", slug="default-test-workspace")
+        session.commit()
+    return {"workspace_id": str(ws.id), "name": ws.name, "slug": ws.slug}
 
 
 @router.post("/meta-smoke")

@@ -25,15 +25,21 @@ from app.schemas.document import (
     DocumentResponse,
     DocumentUploadResponse,
     DuplicateDocumentResponse,
+    OCRRequest,
+    OCRResponse,
+    PageOCRResponse,
     PaginatedChunksResponse,
     PaginatedDocumentsResponse,
     PaginatedPagesResponse,
 )
 from app.services.document_service import (
+    DocumentNotFoundError,
     DocumentServiceError,
     DuplicateDocumentError,
+    OCRExecutionError,
     ValidationError,
     WorkspaceNotFoundError,
+    process_document_ocr,
     upload_document,
 )
 
@@ -215,4 +221,82 @@ def get_document_chunks(
         items=[DocumentChunkResponse.model_validate(c) for c in chunks],
         total=len(chunks),
     )
+
+
+# ── Trigger OCR ──────────────────────────────────────────────────────────────
+
+
+@router.post("/{document_id}/ocr", response_model=OCRResponse)
+def trigger_ocr(
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+    request: OCRRequest | None = None,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Trigger OCR processing on selected pages of a document.
+
+    If page_numbers is not provided, defaults to all pages needing OCR.
+    """
+    req = request or OCRRequest()
+
+    try:
+        doc, results, regenerated_count = process_document_ocr(
+            session=session,
+            settings=settings,
+            workspace_id=workspace_id,
+            document_id=document_id,
+            page_numbers=req.page_numbers,
+            languages=req.languages,
+            dpi=req.dpi,
+        )
+    except DocumentNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        ) from None
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from None
+    except OCRExecutionError as exc:
+        logger.error(
+            "ocr_execution_error",
+            extra={"event": "api.ocr_failed", "document_id": str(document_id), "error": str(exc)},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from None
+    except Exception:
+        logger.exception(
+            "ocr_unexpected_error",
+            extra={"event": "api.ocr_unexpected_failed", "document_id": str(document_id)},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="OCR processing failed unexpectedly.",
+        ) from None
+
+    return OCRResponse(
+        document_id=doc.id,
+        processing_status=doc.processing_status,
+        pages_processed=len(results),
+        chunks_regenerated=regenerated_count,
+        results=[
+            PageOCRResponse(
+                page_number=r.page_number,
+                char_count=r.char_count,
+                extraction_method=r.extraction_method,
+                extraction_status=r.extraction_status,
+                languages_used=r.languages_used,
+                error_message=r.error_message,
+            )
+            for r in results
+        ],
+        message="OCR processing completed.",
+    )
+
 

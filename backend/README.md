@@ -188,7 +188,77 @@ curl -X GET "http://127.0.0.1:8000/api/v1/workspaces/${WORKSPACE_ID}/documents/<
 
 ---
 
-## 7. Testing
+## 7. OCR and Multilingual Document Processing (Milestone 3)
+
+### Overview
+Pramaan AI includes dedicated OCR processing for scanned pages, image-only documents, and multilingual operational records using PyMuPDF's integration with Tesseract OCR.
+
+### Supported Language Configuration
+- **English**: `eng`
+- **Malayalam**: `mal`
+- Additional languages (e.g. Hindi `hin`) can be configured by combining codes with `+`, e.g., `OCR_LANGUAGES=eng+mal+hin`.
+
+### Environment Variables
+```bash
+OCR_LANGUAGES=eng+mal                  # Tesseract language combination
+OCR_DPI=300                            # Rendering resolution for OCR (72-600)
+OCR_MAX_PAGES_PER_REQUEST=20           # Safety limit on pages processed per OCR call
+TESSDATA_PREFIX=/opt/homebrew/share/tessdata  # Optional custom tessdata directory
+```
+
+### System Installation Requirements
+- **macOS (Homebrew)**:
+  ```bash
+  brew install tesseract tesseract-lang
+  ```
+- **Linux / Docker (Debian/Ubuntu)**:
+  ```bash
+  apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-mal
+  ```
+
+### OCR Workflow
+1. **Target Selection**: Targets pages marked `NEEDS_OCR` by default, or an explicitly supplied subset via `page_numbers`.
+2. **Page Isolation**: Renders and processes pages individually to prevent memory spikes.
+3. **Provenance Preservation**: Preserves original digital text if present; assigns extraction methods: `DIGITAL_TEXT`, `OCR`, or `MIXED`.
+4. **Chunk Regeneration**: Atomically deletes previous chunks for the document and re-creates ordered chunks with accurate page provenance.
+5. **Idempotency**: Repeated OCR executions cleanly replace existing chunks without duplication.
+
+### OCR API Endpoint
+- `POST /api/v1/workspaces/{workspace_id}/documents/{document_id}/ocr`
+
+Request body (optional):
+```json
+{
+  "page_numbers": [1, 2],
+  "languages": "eng+mal",
+  "dpi": 300
+}
+```
+
+Response:
+```json
+{
+  "document_id": "92aaff13-687f-4572-b7b6-1e85656ada7b",
+  "processing_status": "READY",
+  "pages_processed": 1,
+  "chunks_regenerated": 2,
+  "results": [
+    {
+      "page_number": 1,
+      "char_count": 142,
+      "extraction_method": "OCR",
+      "extraction_status": "COMPLETED",
+      "languages_used": "eng+mal",
+      "error_message": null
+    }
+  ],
+  "message": "OCR processing completed."
+}
+```
+
+---
+
+## 8. Testing
 
 Run tests against local PostgreSQL with rollback transactions:
 

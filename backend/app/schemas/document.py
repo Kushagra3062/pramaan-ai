@@ -98,3 +98,47 @@ class DuplicateDocumentResponse(BaseModel):
     processing_status: str
     message: str = "A document with the same content already exists in this workspace."
 
+
+# ── OCR schemas ──────────────────────────────────────────────────────────────
+
+
+class OCRRequest(BaseModel):
+    """Optional parameters when triggering OCR on a document."""
+
+    page_numbers: list[int] | None = Field(
+        default=None,
+        description="Optional explicit 1-based page numbers to OCR. Defaults to all pages needing OCR.",
+    )
+    languages: str | None = Field(
+        default=None,
+        description="Optional override for OCR languages (e.g. 'eng+mal', 'hin').",
+    )
+    dpi: int | None = Field(
+        default=None,
+        ge=72,
+        le=600,
+        description="Optional rendering DPI override.",
+    )
+
+
+class PageOCRResponse(BaseModel):
+    """Result of OCR processing for an individual page."""
+
+    page_number: int
+    char_count: int
+    extraction_method: str
+    extraction_status: str
+    languages_used: str
+    error_message: str | None = None
+
+
+class OCRResponse(BaseModel):
+    """Response returned after running OCR on a document."""
+
+    document_id: uuid.UUID
+    processing_status: str
+    pages_processed: int
+    chunks_regenerated: int
+    results: list[PageOCRResponse]
+    message: str
+

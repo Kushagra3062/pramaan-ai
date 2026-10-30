@@ -184,6 +184,15 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         )
         return list(self.session.scalars(stmt).all())
 
+    def delete_by_document(self, document_id: uuid.UUID) -> int:
+        """Delete all chunks belonging to a document."""
+        chunks = self.list_by_document(document_id)
+        count = len(chunks)
+        for chunk in chunks:
+            self.session.delete(chunk)
+        self.session.flush()
+        return count
+
     def list_by_workspace(
         self,
         workspace_id: uuid.UUID,

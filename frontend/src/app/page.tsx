@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 type HealthState = "checking" | "online" | "offline";
@@ -31,10 +32,10 @@ export default function HomePage() {
   return (
     <main className="shell">
       <nav className="nav">
-        <a className="brand" href="/" aria-label="Pramaan AI home">
+        <Link className="brand" href="/" aria-label="Pramaan AI home">
           <span className="brand-mark">P</span>
           <span>pramaan<span className="brand-muted">.ai</span></span>
-        </a>
+        </Link>
         <div className="nav-tag">Evidence-first intelligence</div>
       </nav>
 
@@ -46,7 +47,9 @@ export default function HomePage() {
           Every conclusion should be traceable to a source.
         </p>
         <div className="hero-actions">
-          <button className="primary-button" type="button" onClick={() => window.alert("Foundation milestone only. Document ingestion is the next implementation phase.")}>Explore the workspace <span aria-hidden="true">→</span></button>
+          <Link className="primary-button" href="/test">
+            Open Milestone Test Suite (M1, M2, M3) <span aria-hidden="true">→</span>
+          </Link>
           <a className="secondary-button" href="http://127.0.0.1:8000/docs" target="_blank" rel="noreferrer">Open API docs ↗</a>
         </div>
       </section>
