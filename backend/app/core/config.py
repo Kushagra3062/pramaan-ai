@@ -45,9 +45,19 @@ class Settings(BaseSettings):
     meta_vision_dpi: int = Field(default=250, ge=72, le=600)
     meta_vision_max_image_dim: int = Field(default=2048, ge=512, le=4096)
 
-    # Chunking configuration
-    chunk_size: int = Field(default=1000, ge=100, le=10000)
-    chunk_overlap: int = Field(default=200, ge=0, le=2000)
+    # Chunking configuration (Character-based limits, not tokens)
+    chunk_size: int = Field(
+        default=1000,
+        ge=100,
+        le=10000,
+        description="Target maximum chunk length in characters (not tokens). Boundary logic preserves complete words and sentences.",
+    )
+    chunk_overlap: int = Field(
+        default=200,
+        ge=0,
+        le=2000,
+        description="Target chunk overlap in characters (not tokens) on the same page, snapped to complete word boundaries.",
+    )
 
     # Embedding configuration
     embedding_model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"

@@ -34,6 +34,8 @@ from app.schemas.document import (
     PaginatedChunksResponse,
     PaginatedDocumentsResponse,
     PaginatedPagesResponse,
+    SelectCanonicalRequest,
+    SelectCanonicalResponse,
 )
 from app.services.document_service import (
     DocumentNotFoundError,
@@ -43,6 +45,7 @@ from app.services.document_service import (
     ValidationError,
     WorkspaceNotFoundError,
     process_document_ocr,
+    select_canonical_extraction,
     upload_document,
 )
 
@@ -418,5 +421,90 @@ def get_document_comparison(
     attempts = attempt_repo.list_by_document(document_id)
 
     return _build_comparisons(pages, attempts)
+
+
+# ── Canonical Extraction Selection ──────────────────────────────────────────
+
+
+@router.put("/{document_id}/pages/{page_number}/canonical", response_model=SelectCanonicalResponse)
+def set_page_canonical_extraction(
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+    page_number: int,
+    payload: SelectCanonicalRequest,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Explicitly select the authoritative canonical extraction for a specific page."""
+    try:
+        doc, updated_pages, chunks_count = select_canonical_extraction(
+            session=session,
+            settings=settings,
+            workspace_id=workspace_id,
+            document_id=document_id,
+            page_number=page_number,
+            provider=payload.provider,
+            attempt_id=payload.attempt_id,
+        )
+    except DocumentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.") from None
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from None
+    except Exception as exc:
+        logger.error("set_canonical_failed", extra={"error": str(exc), "document_id": str(document_id)})
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update canonical extraction.",
+        ) from None
+
+    selected_prov = payload.provider or (str(payload.attempt_id) if payload.attempt_id else "unknown")
+    return SelectCanonicalResponse(
+        document_id=doc.id,
+        pages_updated=len(updated_pages),
+        chunks_regenerated=chunks_count,
+        selected_provider=selected_prov,
+        message=f"Canonical extraction set to {selected_prov} for page {page_number}.",
+    )
+
+
+@router.put("/{document_id}/canonical", response_model=SelectCanonicalResponse)
+def set_document_canonical_extraction(
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+    payload: SelectCanonicalRequest,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Explicitly select the authoritative canonical extraction across all pages of a document."""
+    try:
+        doc, updated_pages, chunks_count = select_canonical_extraction(
+            session=session,
+            settings=settings,
+            workspace_id=workspace_id,
+            document_id=document_id,
+            page_number=None,
+            provider=payload.provider,
+            attempt_id=payload.attempt_id,
+        )
+    except DocumentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.") from None
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from None
+    except Exception as exc:
+        logger.error("set_canonical_failed", extra={"error": str(exc), "document_id": str(document_id)})
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update canonical extraction.",
+        ) from None
+
+    selected_prov = payload.provider or (str(payload.attempt_id) if payload.attempt_id else "unknown")
+    return SelectCanonicalResponse(
+        document_id=doc.id,
+        pages_updated=len(updated_pages),
+        chunks_regenerated=chunks_count,
+        selected_provider=selected_prov,
+        message=f"Canonical extraction set to {selected_prov} for all document pages.",
+    )
+
 
 

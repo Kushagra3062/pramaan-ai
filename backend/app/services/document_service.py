@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -24,7 +25,7 @@ from app.db.repositories.document_repo import (
     PageExtractionAttemptRepository,
 )
 from app.db.repositories.workspace_repo import WorkspaceRepository
-from app.ingestion.chunking import PageText, chunk_document
+from app.ingestion.chunking import PageText, chunk_document, clean_canonical_text
 from app.ingestion.extraction import (
     PDFExtractionError,
     extract_pdf,
@@ -40,7 +41,7 @@ from app.ingestion.ocr import (
     run_ocr_on_page,
 )
 from app.ingestion.storage import LocalStorageAdapter, StorageAdapter, StorageError
-from app.models.document import Document
+from app.models.document import Document, DocumentPage
 from app.models.enums import DocumentProcessingStatus
 
 logger = logging.getLogger(__name__)
@@ -184,51 +185,42 @@ def upload_document(
 
         doc.page_count = extraction_result.page_count
 
-        # 8. Persist pages
+        # 8. Persist pages and initial digital extraction attempts
         page_repo = DocumentPageRepository(session)
+        attempt_repo = PageExtractionAttemptRepository(session)
         for page_result in extraction_result.pages:
-            page_repo.create(
+            meta = dict(page_result.metadata or {})
+            is_digital = page_result.extraction_method in ("native_pdf", "DIGITAL_TEXT") and bool(page_result.text)
+            if is_digital:
+                meta["native_digital_text"] = page_result.text
+                meta["canonical_provider"] = "native_digital"
+
+            page_obj = page_repo.create(
                 document_id=document_id,
                 page_number=page_result.page_number,
                 extracted_text=page_result.text,
                 extraction_method=page_result.extraction_method,
                 extraction_status=page_result.extraction_status,
-                page_metadata=page_result.metadata,
+                page_metadata=meta,
             )
 
-        # 9. Create chunks from pages with text
-        pages_with_text = [
-            PageText(page_number=p.page_number, text=p.text)
-            for p in extraction_result.pages
-            if p.char_count >= settings.min_text_density_chars
-        ]
+            if is_digital:
+                attempt_repo.record_attempt(
+                    document_id=document_id,
+                    document_page_id=page_obj.id,
+                    page_number=page_result.page_number,
+                    provider="native_digital",
+                    extracted_text=page_result.text,
+                    status="COMPLETED",
+                )
 
-        chunk_results = chunk_document(
-            pages_with_text,
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
+        # 9. Create chunks from canonical page records using shared helper
+        chunk_count = generate_and_persist_canonical_chunks(
+            session=session,
+            settings=settings,
+            workspace_id=workspace_id,
+            document_id=document_id,
         )
-
-        chunk_repo = DocumentChunkRepository(session)
-        for chunk in chunk_results:
-            chunk_repo.create(
-                workspace_id=workspace_id,
-                document_id=document_id,
-                page_start=chunk.page_start,
-                page_end=chunk.page_end,
-                chunk_index=chunk.chunk_index,
-                content=chunk.content,
-                embedding_model=settings.embedding_model_name,
-                embedding_version=settings.embedding_version,
-                content_hash=chunk.content_hash,
-                token_count=chunk.token_count,
-            )
-
-        # 10. Set final status
-        if extraction_result.overall_status == "NEEDS_OCR":
-            doc.processing_status = DocumentProcessingStatus.NEEDS_OCR.value
-        else:
-            doc.processing_status = DocumentProcessingStatus.READY.value
 
         session.flush()
         session.commit()
@@ -240,7 +232,7 @@ def upload_document(
                 "document_id": str(document_id),
                 "status": doc.processing_status,
                 "page_count": doc.page_count,
-                "chunk_count": len(chunk_results),
+                "chunk_count": chunk_count,
             },
         )
         return doc
@@ -308,6 +300,102 @@ def _safe_filename(filename: str) -> str:
     # Remove any null bytes or control characters
     name = "".join(c for c in name if c.isprintable() and c not in ("\x00", "/", "\\"))
     return name[:255] if name else "document.pdf"
+
+
+def generate_and_persist_canonical_chunks(
+    *,
+    session: Session,
+    settings: Settings,
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> int:
+    """
+    Safely and transactionally generate chunks for a document exclusively from canonical page text.
+    Shared implementation used by both initial document upload and chunk regeneration.
+
+    1. Reads all DocumentPage records for document_id from database.
+    2. Builds PageText inputs using clean_canonical_text(page.extracted_text)
+       for pages where extraction_status is COMPLETED and canonical text exists.
+    3. Deletes any existing chunks for this document in document_chunks.
+    4. Runs deterministic, page-aware chunk_document().
+    5. Persists new ChunkResult records with exact page provenance (page_start == page_end).
+    6. Re-assesses document processing status (READY, NEEDS_OCR, FAILED).
+
+    Returns count of chunks generated.
+    """
+    page_repo = DocumentPageRepository(session)
+    chunk_repo = DocumentChunkRepository(session)
+    doc_repo = DocumentRepository(session)
+    doc = doc_repo.get_by_id(document_id)
+    if not doc:
+        raise DocumentNotFoundError("Document not found")
+
+    all_pages = page_repo.list_by_document(document_id)
+    pages_with_text = [
+        PageText(page_number=p.page_number, text=clean_canonical_text(p.extracted_text))
+        for p in all_pages
+        if p.extracted_text
+        and p.extraction_status == "COMPLETED"
+        and len(clean_canonical_text(p.extracted_text)) >= 20
+    ]
+
+    # Atomically clear previous chunks for this document
+    chunk_repo.delete_by_document(document_id)
+
+    new_chunks = chunk_document(
+        pages_with_text,
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+    )
+
+    for chunk in new_chunks:
+        chunk_repo.create(
+            workspace_id=workspace_id,
+            document_id=document_id,
+            page_start=chunk.page_start,
+            page_end=chunk.page_end,
+            chunk_index=chunk.chunk_index,
+            content=chunk.content,
+            embedding_model=settings.embedding_model_name,
+            embedding_version=settings.embedding_version,
+            content_hash=chunk.content_hash,
+            token_count=chunk.token_count,
+        )
+
+    # Re-assess document status
+    any_needs_ocr = any(p.extraction_status == "NEEDS_OCR" for p in all_pages)
+    any_failed = any(p.extraction_status == "FAILED" for p in all_pages)
+
+    if any_failed:
+        doc.processing_status = DocumentProcessingStatus.FAILED.value
+    elif any_needs_ocr:
+        doc.processing_status = DocumentProcessingStatus.NEEDS_OCR.value
+    else:
+        doc.processing_status = DocumentProcessingStatus.READY.value
+
+    session.flush()
+    return len(new_chunks)
+
+
+def regenerate_document_chunks(
+    *,
+    session: Session,
+    settings: Settings,
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> int:
+    """
+    Safely and transactionally regenerate chunks for a document exclusively from canonical page text.
+    Re-assesses document processing status (READY, NEEDS_OCR, FAILED).
+    Delegates to shared generate_and_persist_canonical_chunks helper.
+    Returns new chunk count.
+    """
+    return generate_and_persist_canonical_chunks(
+        session=session,
+        settings=settings,
+        workspace_id=workspace_id,
+        document_id=document_id,
+    )
 
 
 def process_document_ocr(
@@ -438,7 +526,6 @@ def process_document_ocr(
             meta_extractor = MetaVisionExtractor(settings)
 
             for page_num in targets:
-                existing_text = existing_texts.get(page_num, "")
                 page_obj = page_map[page_num]
 
                 if selected_mode == "meta_vision":
@@ -451,18 +538,9 @@ def process_document_ocr(
                     vision_res = meta_extractor.transcribe_image_bytes(png_bytes, mime_type=mime_type)
 
                     if vision_res.status == "COMPLETED" and vision_res.transcription:
-                        clean_transcription = vision_res.transcription
-                        if (
-                            page_obj.extraction_method == "DIGITAL_TEXT"
-                            and existing_text.strip()
-                            and "[MUSE SPARK VISION]:" not in existing_text
-                            and existing_text not in clean_transcription
-                        ):
-                            combined_text = f"{existing_text}\n\n[MUSE SPARK VISION]:\n{clean_transcription}"
-                            method = "MIXED"
-                        else:
-                            combined_text = clean_transcription
-                            method = "META_VISION"
+                        clean_transcription = clean_canonical_text(vision_res.transcription)
+                        combined_text = clean_transcription
+                        method = "META_VISION"
 
                         res = PageOCRResult(
                             page_number=page_num,
@@ -524,9 +602,10 @@ def process_document_ocr(
                                 page_num,
                                 languages=selected_langs,
                                 dpi=selected_dpi,
-                                existing_digital_text=existing_text,
+                                existing_digital_text="",
                                 tessdata_prefix=settings.tessdata_prefix,
                             )
+                            tess_res.recognized_text = clean_canonical_text(tess_res.recognized_text)
                             tess_res.metadata["fallback_from"] = "meta_vision"
                             ocr_results.append(tess_res)
 
@@ -563,9 +642,10 @@ def process_document_ocr(
                         page_num,
                         languages=selected_langs,
                         dpi=selected_dpi,
-                        existing_digital_text=existing_text,
+                        existing_digital_text="",
                         tessdata_prefix=settings.tessdata_prefix,
                     )
+                    tess_res.recognized_text = clean_canonical_text(tess_res.recognized_text)
                     attempt_repo.record_attempt(
                         document_id=doc.id,
                         document_page_id=page_obj.id,
@@ -587,6 +667,7 @@ def process_document_ocr(
                     )
                     vision_res = meta_extractor.transcribe_image_bytes(png_bytes, mime_type=mime_type)
 
+                    vision_text = clean_canonical_text(vision_res.transcription)
                     attempt_repo.record_attempt(
                         document_id=doc.id,
                         document_page_id=page_obj.id,
@@ -595,7 +676,7 @@ def process_document_ocr(
                         model_id=vision_res.model_id,
                         prompt_version=vision_res.prompt_version,
                         language_configuration="+".join(vision_res.language_hints),
-                        extracted_text=vision_res.transcription,
+                        extracted_text=vision_text,
                         status=vision_res.status,
                         usage_metadata=vision_res.usage_metadata,
                         latency_ms=vision_res.latency_ms,
@@ -603,7 +684,7 @@ def process_document_ocr(
                         error_code=vision_res.error_code,
                     )
 
-                    # In COMPARE mode: Canonical text is preserved as Tesseract (or original) by default
+                    # In COMPARE mode: Canonical text is preserved; chunks are NOT modified
                     ocr_results.append(tess_res)
 
         finally:
@@ -614,8 +695,9 @@ def process_document_ocr(
         if selected_mode != "compare":
             for res in ocr_results:
                 page = page_map[res.page_number]
+                clean_text = clean_canonical_text(res.recognized_text)
                 if res.extraction_status == "COMPLETED":
-                    page.extracted_text = res.recognized_text
+                    page.extracted_text = clean_text
                     page.extraction_method = res.extraction_method
                     page.extraction_status = res.extraction_status
                 else:
@@ -623,58 +705,22 @@ def process_document_ocr(
 
                 meta = dict(page.page_metadata or {})
                 meta.update(res.metadata)
-                meta["extraction_provider"] = res.provider
+                meta["canonical_provider"] = res.provider
+                meta["canonical_selected_at"] = datetime.now(UTC).isoformat()
                 if res.error_message:
                     meta["ocr_error"] = res.error_message
                 page.page_metadata = meta
 
             session.flush()
 
-            # Regenerate chunks using boundary-preserving chunker
-            chunk_repo = DocumentChunkRepository(session)
-            chunk_repo.delete_by_document(document_id)
-
-            all_pages_now = page_repo.list_by_document(document_id)
-            pages_with_text = [
-                PageText(page_number=p.page_number, text=p.extracted_text)
-                for p in all_pages_now
-                if p.extracted_text and len(p.extracted_text.strip()) >= settings.min_text_density_chars
-            ]
-
-            new_chunks = chunk_document(
-                pages_with_text,
-                chunk_size=settings.chunk_size,
-                chunk_overlap=settings.chunk_overlap,
+            new_chunk_count = regenerate_document_chunks(
+                session=session,
+                settings=settings,
+                workspace_id=workspace_id,
+                document_id=document_id,
             )
-
-            for chunk in new_chunks:
-                chunk_repo.create(
-                    workspace_id=workspace_id,
-                    document_id=document_id,
-                    page_start=chunk.page_start,
-                    page_end=chunk.page_end,
-                    chunk_index=chunk.chunk_index,
-                    content=chunk.content,
-                    embedding_model=settings.embedding_model_name,
-                    embedding_version=settings.embedding_version,
-                    content_hash=chunk.content_hash,
-                    token_count=chunk.token_count,
-                )
-
-            # Re-assess document status
-            any_needs_ocr = any(p.extraction_status == "NEEDS_OCR" for p in all_pages_now)
-            any_failed = any(p.extraction_status == "FAILED" for p in all_pages_now)
-
-            if any_failed:
-                doc.processing_status = DocumentProcessingStatus.FAILED.value
-            elif any_needs_ocr:
-                doc.processing_status = DocumentProcessingStatus.NEEDS_OCR.value
-            else:
-                doc.processing_status = DocumentProcessingStatus.READY.value
-
-            new_chunk_count = len(new_chunks)
         else:
-            # Compare mode: chunks are not replaced; both attempts are recorded in attempts table
+            # Compare mode: chunks are preserved untouched; attempts are recorded
             chunk_repo = DocumentChunkRepository(session)
             new_chunk_count = len(chunk_repo.list_by_document(document_id))
 
@@ -695,4 +741,147 @@ def process_document_ocr(
     except Exception:
         session.rollback()
         raise
+
+
+def select_canonical_extraction(
+    *,
+    session: Session,
+    settings: Settings,
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+    page_number: int | None = None,
+    provider: str | None = None,
+    attempt_id: uuid.UUID | None = None,
+) -> tuple[Document, list[DocumentPage], int]:
+    """
+    Explicitly select the authoritative canonical extraction for a single page or all pages of a document.
+    Transactionally updates document_pages and regenerates chunks from the updated canonical text.
+
+    Args:
+        session: SQLAlchemy DB session.
+        settings: Application settings.
+        workspace_id: UUID of the workspace.
+        document_id: UUID of the document.
+        page_number: Optional 1-based page number. If None, applies provider selection across all pages.
+        provider: Provider name ('tesseract', 'meta_vision', 'native_digital').
+        attempt_id: Optional UUID of a specific PageExtractionAttempt to promote to canonical.
+
+    Returns:
+        tuple of (Document, list of updated DocumentPage objects, new chunk count)
+    """
+    if not provider and not attempt_id:
+        raise ValidationError("Either 'provider' or 'attempt_id' must be specified.")
+
+    doc_repo = DocumentRepository(session)
+    doc = doc_repo.get_by_workspace_and_id(workspace_id, document_id)
+    if not doc:
+        raise DocumentNotFoundError("Document not found in workspace")
+
+    page_repo = DocumentPageRepository(session)
+    attempt_repo = PageExtractionAttemptRepository(session)
+    existing_pages = page_repo.list_by_document(document_id)
+    if not existing_pages:
+        raise ValidationError("Document has no recorded pages.")
+
+    if page_number is not None:
+        target_pages = [p for p in existing_pages if p.page_number == page_number]
+        if not target_pages:
+            raise ValidationError(f"Page number {page_number} does not exist in document.")
+    else:
+        target_pages = existing_pages
+
+    specific_attempt = None
+    if attempt_id is not None:
+        specific_attempt = attempt_repo.get_by_id(attempt_id)
+        if not specific_attempt:
+            raise ValidationError(f"Extraction attempt '{attempt_id}' not found.")
+        if specific_attempt.document_id != document_id:
+            raise ValidationError("Attempt does not belong to this document.")
+        if specific_attempt.status != "COMPLETED":
+            raise ValidationError(f"Cannot select non-completed extraction attempt '{attempt_id}' as canonical.")
+
+        # Target the page corresponding to this attempt
+        attempt_page = next((p for p in existing_pages if p.id == specific_attempt.document_page_id), None)
+        if not attempt_page:
+            raise ValidationError("Page for this attempt not found in document.")
+        if page_number is not None and attempt_page.page_number != page_number:
+            raise ValidationError(
+                f"Attempt belongs to page {attempt_page.page_number}, not requested page {page_number}."
+            )
+        target_pages = [attempt_page]
+
+    now_iso = datetime.now(UTC).isoformat()
+    updated_pages: list[DocumentPage] = []
+
+    try:
+        with session.begin_nested():
+            for page in target_pages:
+                if specific_attempt is not None:
+                    clean_text = clean_canonical_text(specific_attempt.extracted_text)
+                    method = specific_attempt.provider.upper()
+                    prov_name = specific_attempt.provider
+                    att_id_str = str(specific_attempt.id)
+                else:
+                    prov_name = (provider or "").lower()
+                    if prov_name == "native_digital":
+                        native_text = (page.page_metadata or {}).get("native_digital_text")
+                        if not native_text and page.extraction_method in ("native_pdf", "DIGITAL_TEXT") and page.extracted_text:
+                            native_text = page.extracted_text
+                        if not native_text or not native_text.strip():
+                            raise ValidationError(f"Page {page.page_number} has no recorded native digital text.")
+                        clean_text = clean_canonical_text(native_text)
+                        method = page.extraction_method if page.extraction_method in ("native_pdf", "DIGITAL_TEXT") else "native_pdf"
+                        att_id_str = None
+                    elif prov_name in ("tesseract", "meta_vision"):
+                        latest_att = attempt_repo.get_latest_completed(page.id, prov_name)
+                        if not latest_att:
+                            raise ValidationError(
+                                f"Page {page.page_number} has no completed extraction attempt for provider '{provider}'. "
+                                "Run extraction first."
+                            )
+                        clean_text = clean_canonical_text(latest_att.extracted_text)
+                        method = prov_name.upper()
+                        att_id_str = str(latest_att.id)
+                    else:
+                        raise ValidationError(
+                            f"Unsupported canonical provider '{provider}'. Allowed: tesseract, meta_vision, native_digital"
+                        )
+
+                page.extracted_text = clean_text
+                page.extraction_method = method
+                page.extraction_status = "COMPLETED"
+
+                meta = dict(page.page_metadata or {})
+                meta["canonical_provider"] = prov_name
+                if att_id_str:
+                    meta["canonical_attempt_id"] = att_id_str
+                meta["canonical_selected_at"] = now_iso
+                page.page_metadata = meta
+
+                updated_pages.append(page)
+
+            session.flush()
+
+            new_chunk_count = regenerate_document_chunks(
+                session=session,
+                settings=settings,
+                workspace_id=workspace_id,
+                document_id=document_id,
+            )
+        session.commit()
+    except Exception:
+        raise
+
+    logger.info(
+        "canonical_extraction_updated",
+        extra={
+            "event": "canonical.updated",
+            "document_id": str(document_id),
+            "pages_count": len(updated_pages),
+            "chunks_count": new_chunk_count,
+            "provider": provider or (specific_attempt.provider if specific_attempt else None),
+        },
+    )
+    return doc, updated_pages, new_chunk_count
+
 

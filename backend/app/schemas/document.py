@@ -182,3 +182,27 @@ class OCRResponse(BaseModel):
     comparisons: list[PageComparisonResponse] = Field(default_factory=list)
     message: str
 
+
+class SelectCanonicalRequest(BaseModel):
+    """Request payload to select canonical extraction for a page or document."""
+
+    provider: str | None = Field(
+        default=None,
+        description="Provider to select as canonical: 'tesseract', 'meta_vision', or 'native_digital'.",
+    )
+    attempt_id: uuid.UUID | None = Field(
+        default=None,
+        description="Optional explicit extraction attempt ID to select as canonical.",
+    )
+
+
+class SelectCanonicalResponse(BaseModel):
+    """Response returned after updating canonical extraction."""
+
+    document_id: uuid.UUID
+    pages_updated: int
+    chunks_regenerated: int
+    selected_provider: str
+    message: str
+
+

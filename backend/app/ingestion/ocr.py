@@ -167,11 +167,11 @@ def run_ocr_on_page(
 
     # Determine combined text & method
     if has_digital and has_ocr:
-        # Preserve digital text and append OCR text if different
+        # Preserve digital text and append OCR text if different, without debug labels
         if ocr_text in existing_digital_text:
             combined_text = existing_digital_text
         else:
-            combined_text = f"{existing_digital_text}\n\n[OCR EXTRACTED]:\n{ocr_text}"
+            combined_text = f"{existing_digital_text}\n\n{ocr_text}"
         method = "MIXED"
     elif has_ocr:
         combined_text = ocr_text

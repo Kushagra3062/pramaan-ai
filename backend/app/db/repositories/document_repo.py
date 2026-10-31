@@ -45,6 +45,13 @@ class DocumentRepository(BaseRepository[Document]):
         )
         return self.add(doc)
 
+    def get_by_workspace_and_id(self, workspace_id: uuid.UUID, document_id: uuid.UUID) -> Document | None:
+        stmt = select(Document).where(
+            Document.workspace_id == workspace_id,
+            Document.id == document_id,
+        )
+        return self.session.scalars(stmt).first()
+
     def get_by_sha256(self, workspace_id: uuid.UUID, sha256: str) -> Document | None:
         stmt = select(Document).where(
             Document.workspace_id == workspace_id,
@@ -245,6 +252,22 @@ class PageExtractionAttemptRepository(BaseRepository[PageExtractionAttempt]):
             error_code=error_code,
         )
         return self.add(attempt)
+
+    def get_by_id(self, attempt_id: uuid.UUID) -> PageExtractionAttempt | None:
+        stmt = select(PageExtractionAttempt).where(PageExtractionAttempt.id == attempt_id)
+        return self.session.scalars(stmt).first()
+
+    def get_latest_completed(self, document_page_id: uuid.UUID, provider: str) -> PageExtractionAttempt | None:
+        stmt = (
+            select(PageExtractionAttempt)
+            .where(
+                PageExtractionAttempt.document_page_id == document_page_id,
+                PageExtractionAttempt.provider == provider,
+                PageExtractionAttempt.status == "COMPLETED",
+            )
+            .order_by(PageExtractionAttempt.created_at.desc())
+        )
+        return self.session.scalars(stmt).first()
 
     def list_by_page(self, document_page_id: uuid.UUID) -> list[PageExtractionAttempt]:
         stmt = (
