@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { EvidenceLockNotice, ExtractionPanel } from "@/components/extraction/ExtractionPanel";
+import { listFacts, listRequirements } from "@/lib/api/extraction";
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 
@@ -88,7 +90,7 @@ interface OCRResponseData {
 
 export default function MilestoneTestPage() {
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
-  const [activeTab, setActiveTab] = useState<"m1" | "m2" | "m3" | "m31">("m31");
+  const [activeTab, setActiveTab] = useState<"m1" | "m2" | "m3" | "m31" | "m4">("m31");
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>("");
 
@@ -109,6 +111,12 @@ export default function MilestoneTestPage() {
   const [ocrDpi, setOcrDpi] = useState(250);
   const [ocrLoading, setOcrLoading] = useState(false);
   const [ocrResponse, setOcrResponse] = useState<OCRResponseData | null>(null);
+
+  // Structured extraction (Milestone 4): whether the selected document already has evidence links.
+  // Evidence links block OCR reruns / canonical changes on the backend (HTTP 409); this only informs the user.
+  const [hasEvidence, setHasEvidence] = useState(false);
+  const [evidenceProbe, setEvidenceProbe] = useState(0);
+  const probeSeq = useRef(0);
 
   // Health & DB status
   const [healthLive, setHealthLive] = useState<string>("Checking...");
@@ -145,6 +153,24 @@ export default function MilestoneTestPage() {
     void init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Read-only probe (GET only, never extracts): does the selected document have evidence-linked results?
+  useEffect(() => {
+    const seq = ++probeSeq.current;
+    if (!workspace || !selectedDocId) {
+      setHasEvidence(false);
+      return;
+    }
+    void Promise.all([
+      listFacts(workspace.workspace_id, selectedDocId, { limit: 1 }),
+      listRequirements(workspace.workspace_id, selectedDocId, { limit: 1 }),
+    ]).then(([facts, reqs]) => {
+      if (seq !== probeSeq.current) return; // stale: another document was selected meanwhile
+      const factEvidence = facts.ok && facts.data.items.some((f) => f.evidence.length > 0);
+      const reqEvidence = reqs.ok && reqs.data.items.some((r) => r.evidence.length > 0);
+      setHasEvidence(factEvidence || reqEvidence);
+    });
+  }, [workspace, selectedDocId, evidenceProbe]);
 
   async function loadDocuments(wsId: string) {
     try {
@@ -399,6 +425,13 @@ export default function MilestoneTestPage() {
         >
           ✨ Milestone 3.1: Meta Muse Spark Vision
         </button>
+        <button
+          className={activeTab === "m4" ? "primary-button" : "secondary-button"}
+          style={{ padding: "8px 14px", fontSize: "13px", whiteSpace: "nowrap", border: activeTab === "m4" ? "1px solid var(--mint)" : "1px solid #4a6fa5" }}
+          onClick={() => setActiveTab("m4")}
+        >
+          Milestone 4: Structured Extraction
+        </button>
       </div>
 
       {/* ─── TAB 1: MILESTONE 1 (DATABASE & HEALTH) ─── */}
@@ -428,7 +461,7 @@ export default function MilestoneTestPage() {
       {/* ─── TABS 2, 3, 3.1: INGESTION, OCR & META VISION ─── */}
       {activeTab !== "m1" && (
         <section>
-          <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: "24px" }}>
+          <div className="test-layout">
             {/* Sidebar: Upload & Document Selector */}
             <div>
               <div className="feature-card" style={{ marginBottom: "20px" }}>
@@ -570,7 +603,14 @@ export default function MilestoneTestPage() {
                       </span>
                     </div>
 
-                    {/* Extraction Control Box (Milestone 3 & 3.1) */}
+                    {activeTab !== "m4" && hasEvidence && (
+                      <div style={{ marginTop: "16px" }}>
+                        <EvidenceLockNotice />
+                      </div>
+                    )}
+
+                    {/* Extraction Control Box (Milestone 3 & 3.1) — hidden on the structured-extraction tab */}
+                    {activeTab !== "m4" && (
                     <div style={{ marginTop: "16px", padding: "14px", background: "rgba(146,183,255,0.06)", border: "1px solid rgba(146,183,255,0.25)", borderRadius: "8px" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }}>
                         <div>
@@ -670,8 +710,22 @@ export default function MilestoneTestPage() {
                         </div>
                       )}
                     </div>
+                    )}
                   </div>
 
+                  {/* Structured extraction dashboard (Milestone 4). Kept mounted so an in-flight run survives tab switches. */}
+                  <ExtractionPanel
+                    workspaceId={workspace?.workspace_id ?? ""}
+                    doc={selectedDoc}
+                    pages={pages}
+                    chunks={chunks}
+                    active={activeTab === "m4"}
+                    hasEvidence={hasEvidence}
+                    onExtractionFinished={() => setEvidenceProbe((n) => n + 1)}
+                  />
+
+                  {activeTab !== "m4" && (
+                  <>
                   {/* Dual Comparison View (when compare mode is active or comparisons exist) */}
                   {comparisons.length > 0 && (
                     <div style={{ marginBottom: "20px" }}>
@@ -937,6 +991,8 @@ export default function MilestoneTestPage() {
                       )}
                     </div>
                   </div>
+                  </>
+                  )}
                 </div>
               )}
             </div>

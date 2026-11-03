@@ -24,6 +24,7 @@ from app.db.repositories.document_repo import (
     DocumentRepository,
     PageExtractionAttemptRepository,
 )
+from app.db.repositories.fact_repo import EvidenceLinkRepository
 from app.db.repositories.workspace_repo import WorkspaceRepository
 from app.ingestion.chunking import PageText, chunk_document, clean_canonical_text
 from app.ingestion.extraction import (
@@ -40,9 +41,16 @@ from app.ingestion.ocr import (
     render_page_to_image_bytes,
     run_ocr_on_page,
 )
-from app.ingestion.storage import LocalStorageAdapter, StorageAdapter, StorageError
+from app.ingestion.storage import (
+    GCSStorageAdapter,
+    LocalStorageAdapter,
+    StorageAdapter,
+    StorageError,
+    SupabaseStorageAdapter,
+)
 from app.models.document import Document, DocumentPage
 from app.models.enums import DocumentProcessingStatus
+from app.services.model_budget import get_model_budget
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +83,34 @@ class DocumentNotFoundError(DocumentServiceError):
     """The requested document does not exist."""
 
 
+class EvidenceLinksExistError(DocumentServiceError):
+    """Chunk regeneration refused: evidence links reference this document's chunks.
+
+    Regenerating chunks deletes and re-creates them with new IDs, which would cascade-delete
+    evidence links (including human-verified ones). Nothing is modified when this is raised.
+    """
+
+    def __init__(self, document_id: uuid.UUID) -> None:
+        self.document_id = document_id
+        super().__init__(
+            "Cannot regenerate chunks: evidence links reference existing chunks of this document"
+        )
+
+
 class OCRExecutionError(DocumentServiceError):
     """Failure during OCR processing."""
 
 
 def _get_storage(settings: Settings) -> StorageAdapter:
     """Create a storage adapter from settings."""
+    if settings.storage_backend == "gcs":
+        if not settings.gcs_bucket_name:
+            raise DocumentServiceError("GCS_BUCKET_NAME is required when STORAGE_BACKEND=gcs")
+        return GCSStorageAdapter(settings.gcs_bucket_name, settings.gcs_project_id)
+    if settings.storage_backend == "supabase":
+        if not settings.supabase_url or not settings.supabase_service_role_key or not settings.supabase_storage_bucket:
+            raise DocumentServiceError("Supabase Storage configuration is incomplete")
+        return SupabaseStorageAdapter(settings.supabase_url, settings.supabase_service_role_key, settings.supabase_storage_bucket)
     return LocalStorageAdapter(settings.document_storage_dir)
 
 
@@ -316,7 +346,8 @@ def generate_and_persist_canonical_chunks(
     1. Reads all DocumentPage records for document_id from database.
     2. Builds PageText inputs using clean_canonical_text(page.extracted_text)
        for pages where extraction_status is COMPLETED and canonical text exists.
-    3. Deletes any existing chunks for this document in document_chunks.
+    3. Locks the document row and refuses (EvidenceLinksExistError, nothing modified) if any
+       evidence link references its chunks; otherwise deletes existing chunks.
     4. Runs deterministic, page-aware chunk_document().
     5. Persists new ChunkResult records with exact page provenance (page_start == page_end).
     6. Re-assesses document processing status (READY, NEEDS_OCR, FAILED).
@@ -326,9 +357,13 @@ def generate_and_persist_canonical_chunks(
     page_repo = DocumentPageRepository(session)
     chunk_repo = DocumentChunkRepository(session)
     doc_repo = DocumentRepository(session)
-    doc = doc_repo.get_by_id(document_id)
+    # Lock the parent document row (held until the outer transaction ends) so evidence
+    # persistence and chunk regeneration cannot interleave, then refuse if evidence exists.
+    doc = doc_repo.get_for_update(workspace_id, document_id)
     if not doc:
         raise DocumentNotFoundError("Document not found")
+    if EvidenceLinkRepository(session).exists_for_document(document_id):
+        raise EvidenceLinksExistError(document_id)
 
     all_pages = page_repo.list_by_document(document_id)
     pages_with_text = [
@@ -482,6 +517,12 @@ def process_document_ocr(
     selected_langs = languages or settings.ocr_languages
     selected_dpi = dpi or (settings.meta_vision_dpi if selected_mode == "meta_vision" else settings.ocr_dpi)
 
+    # Vision modes spend real model calls (Tesseract is local). Reserve the whole page batch up
+    # front so an OCR request is never partially started because only some pages fit the
+    # remaining daily budget.
+    vision_calls = len(targets) if selected_mode in ("meta_vision", "compare") else 0
+    reservation = get_model_budget().reserve(vision_calls) if vision_calls else None
+
     existing_texts = {p.page_number: p.extracted_text or "" for p in existing_pages}
     ocr_results: list[PageOCRResult] = []
     attempt_repo = PageExtractionAttemptRepository(session)
@@ -520,6 +561,8 @@ def process_document_ocr(
         try:
             pdf_doc = pymupdf.open("pdf", pdf_bytes)
         except Exception as exc:
+            if reservation is not None:
+                reservation.release_unused()
             raise OCRExecutionError(f"Cannot open PDF: {exc}") from exc
 
         try:
@@ -535,6 +578,8 @@ def process_document_ocr(
                         dpi=selected_dpi,
                         max_dim=settings.meta_vision_max_image_dim,
                     )
+                    if reservation is not None:
+                        reservation.consume()
                     vision_res = meta_extractor.transcribe_image_bytes(png_bytes, mime_type=mime_type)
 
                     if vision_res.status == "COMPLETED" and vision_res.transcription:
@@ -665,6 +710,8 @@ def process_document_ocr(
                         dpi=selected_dpi,
                         max_dim=settings.meta_vision_max_image_dim,
                     )
+                    if reservation is not None:
+                        reservation.consume()
                     vision_res = meta_extractor.transcribe_image_bytes(png_bytes, mime_type=mime_type)
 
                     vision_text = clean_canonical_text(vision_res.transcription)
@@ -688,6 +735,8 @@ def process_document_ocr(
                     ocr_results.append(tess_res)
 
         finally:
+            if reservation is not None:
+                reservation.release_unused()
             pdf_doc.close()
 
     # Update database transactionally

@@ -2,14 +2,54 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import Generator
+from urllib.parse import urlparse
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_workspace_read, require_workspace_write
+from app.core.config import get_settings
 from app.db.engine import engine, get_db
 from app.main import app
 from app.models.workspace import User, Workspace
+from app.services import model_budget
+
+
+def pytest_sessionstart() -> None:
+    """Refuse a suite that was not explicitly pointed at a disposable test database."""
+    parsed = urlparse(str(engine.url).replace("postgresql+psycopg", "postgresql"))
+    database = parsed.path.lstrip("/")
+    if database != "pramaan_test" or parsed.hostname not in {"127.0.0.1", "localhost"}:
+        raise pytest.UsageError("tests require an explicitly configured localhost pramaan_test database")
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_test_settings(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Keep local .env provider settings (e.g. compare mode) from leaking into tests.
+
+    Environment variables take precedence over the .env file, so this pins the
+    scanned-page provider to the offline Tesseract path. Tests that exercise
+    meta_vision/compare must request it explicitly (provider arg or settings
+    override) and mock Meta responses.
+    """
+    monkeypatch.setenv("SCANNED_PAGE_EXTRACTOR", "tesseract")
+    get_settings.cache_clear()
+    yield
+    monkeypatch.undo()
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_model_budget() -> Generator[None, None, None]:
+    """Keep the suite away from the real installation-wide daily model-call budget.
+
+    Tests that exercise budget enforcement override this with a real Postgres budget on a
+    far-future UTC date, so no test can charge or block the production counter.
+    """
+    model_budget.override_model_budget(model_budget.NoopModelBudget())
+    yield
+    model_budget.reset_model_budget()
 
 
 @pytest.fixture
@@ -20,13 +60,25 @@ def temp_storage_dir() -> Generator[str, None, None]:
     shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def _stub_workspace_guard() -> None:
+    """Stand-in for the workspace guards in feature tests that predate authentication.
+
+    Authentication and authorization themselves are covered by tests/test_auth.py and
+    tests/test_workspace_authorization.py, which use the real dependencies; that suite also
+    asserts every workspace route answers 401 without credentials.
+    """
+    return None
+
+
 @pytest.fixture
 def client(db_session: Session) -> Generator[TestClient, None, None]:
-    """FastAPI TestClient with db_session overridden."""
+    """FastAPI TestClient with db_session overridden and route guards stubbed out."""
     def _override_get_db():
         yield db_session
 
     app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[require_workspace_read] = _stub_workspace_guard
+    app.dependency_overrides[require_workspace_write] = _stub_workspace_guard
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

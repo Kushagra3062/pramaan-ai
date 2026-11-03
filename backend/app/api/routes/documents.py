@@ -12,6 +12,8 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_workspace_read, require_workspace_write
+from app.core import metrics
 from app.core.config import Settings, get_settings
 from app.db.engine import get_db
 from app.db.repositories.document_repo import (
@@ -20,6 +22,7 @@ from app.db.repositories.document_repo import (
     DocumentRepository,
     PageExtractionAttemptRepository,
 )
+from app.models.enums import DocumentProcessingStatus
 from app.schemas.document import (
     DocumentChunkResponse,
     DocumentPageResponse,
@@ -41,6 +44,7 @@ from app.services.document_service import (
     DocumentNotFoundError,
     DocumentServiceError,
     DuplicateDocumentError,
+    EvidenceLinksExistError,
     OCRExecutionError,
     ValidationError,
     WorkspaceNotFoundError,
@@ -48,12 +52,18 @@ from app.services.document_service import (
     select_canonical_extraction,
     upload_document,
 )
+from app.services.model_budget import ModelBudgetExceededError, seconds_until_next_utc_day
 
 router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/documents",
     tags=["documents"],
+    dependencies=[Depends(require_workspace_read)],
 )
 logger = logging.getLogger(__name__)
+
+EVIDENCE_LOCK_DETAIL = (
+    "Canonical text cannot be regenerated or changed while evidence links exist for this document."
+)
 
 
 # ── Upload ────────────────────────────────────────────────────────────────────
@@ -63,6 +73,7 @@ logger = logging.getLogger(__name__)
     "",
     status_code=status.HTTP_201_CREATED,
     response_model=DocumentUploadResponse | DuplicateDocumentResponse,
+    dependencies=[Depends(require_workspace_write)],
 )
 def upload(
     workspace_id: uuid.UUID,
@@ -94,16 +105,19 @@ def upload(
             detail=f"Workspace {workspace_id} not found.",
         ) from None
     except ValidationError as exc:
+        metrics.record_metric(metrics.METRIC_DOCUMENT_UPLOADS, labels={"outcome": "rejected"})
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from None
     except DuplicateDocumentError as exc:
+        metrics.record_metric(metrics.METRIC_DOCUMENT_UPLOADS, labels={"outcome": "duplicate"})
         return DuplicateDocumentResponse(
             existing_document_id=exc.existing_document.id,
             processing_status=exc.existing_document.processing_status,
         )
     except DocumentServiceError as exc:
+        metrics.record_metric(metrics.METRIC_DOCUMENT_UPLOADS, labels={"outcome": "failure"})
         logger.error(
             "document_upload_failed",
             extra={"event": "api.document_upload_failed", "error": str(exc)},
@@ -113,6 +127,16 @@ def upload(
             detail="Document processing failed.",
         ) from None
 
+    metrics.record_metric(
+        metrics.METRIC_DOCUMENT_UPLOADS,
+        labels={
+            "outcome": (
+                "success"
+                if doc.processing_status != DocumentProcessingStatus.FAILED.value
+                else "failed"
+            )
+        },
+    )
     return DocumentUploadResponse(
         id=doc.id,
         processing_status=doc.processing_status,
@@ -273,7 +297,7 @@ def _build_comparisons(
     return comparisons
 
 
-@router.post("/{document_id}/ocr", response_model=OCRResponse)
+@router.post("/{document_id}/ocr", response_model=OCRResponse, dependencies=[Depends(require_workspace_write)])
 def trigger_ocr(
     workspace_id: uuid.UUID,
     document_id: uuid.UUID,
@@ -301,17 +325,49 @@ def trigger_ocr(
             provider=req.provider,
             fallback_to_tesseract=req.fallback_to_tesseract,
         )
+    except ModelBudgetExceededError as exc:
+        metrics.record_metric(
+            metrics.METRIC_USAGE_LIMIT_REJECTIONS, labels={"limit": "daily"}
+        )
+        logger.warning(
+            "daily_model_budget_exhausted",
+            extra={
+                "event": "usage.limit_rejected",
+                "limit": "daily",
+                "requested_calls": exc.requested,
+                "remaining_calls": exc.remaining,
+                "daily_model_call_limit": exc.limit,
+                "budget_date": exc.budget_date.isoformat(),
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Daily model call budget exhausted for "
+                f"{exc.budget_date.isoformat()} (UTC): {exc.remaining} of {exc.limit} calls "
+                f"remaining, {exc.requested} required. No page was processed."
+            ),
+            headers={"Retry-After": str(seconds_until_next_utc_day())},
+        ) from None
     except DocumentNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found.",
         ) from None
     except ValidationError as exc:
+        metrics.record_metric(metrics.METRIC_OCR_PAGES, labels={"outcome": "rejected"})
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from None
+    except EvidenceLinksExistError:
+        metrics.record_metric(metrics.METRIC_OCR_PAGES, labels={"outcome": "blocked"})
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=EVIDENCE_LOCK_DETAIL,
+        ) from None
     except OCRExecutionError as exc:
+        metrics.record_metric(metrics.METRIC_OCR_PAGES, labels={"outcome": "failure"})
         logger.error(
             "ocr_execution_error",
             extra={"event": "api.ocr_failed", "document_id": str(document_id), "error": str(exc)},
@@ -321,6 +377,7 @@ def trigger_ocr(
             detail=str(exc),
         ) from None
     except Exception:
+        metrics.record_metric(metrics.METRIC_OCR_PAGES, labels={"outcome": "failure"})
         logger.exception(
             "ocr_unexpected_error",
             extra={"event": "api.ocr_unexpected_failed", "document_id": str(document_id)},
@@ -338,6 +395,12 @@ def trigger_ocr(
         attempts = attempt_repo.list_by_document(document_id)
         comparisons = _build_comparisons(pages, attempts)
 
+    metrics.record_metric(
+        metrics.METRIC_OCR_PAGES,
+        value=len(results),
+        unit="pages",
+        labels={"outcome": "success", "mode": provider_mode},
+    )
     return OCRResponse(
         document_id=doc.id,
         processing_status=doc.processing_status,
@@ -426,7 +489,7 @@ def get_document_comparison(
 # ── Canonical Extraction Selection ──────────────────────────────────────────
 
 
-@router.put("/{document_id}/pages/{page_number}/canonical", response_model=SelectCanonicalResponse)
+@router.put("/{document_id}/pages/{page_number}/canonical", response_model=SelectCanonicalResponse, dependencies=[Depends(require_workspace_write)])
 def set_page_canonical_extraction(
     workspace_id: uuid.UUID,
     document_id: uuid.UUID,
@@ -450,6 +513,11 @@ def set_page_canonical_extraction(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.") from None
     except ValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from None
+    except EvidenceLinksExistError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=EVIDENCE_LOCK_DETAIL,
+        ) from None
     except Exception as exc:
         logger.error("set_canonical_failed", extra={"error": str(exc), "document_id": str(document_id)})
         raise HTTPException(
@@ -467,7 +535,7 @@ def set_page_canonical_extraction(
     )
 
 
-@router.put("/{document_id}/canonical", response_model=SelectCanonicalResponse)
+@router.put("/{document_id}/canonical", response_model=SelectCanonicalResponse, dependencies=[Depends(require_workspace_write)])
 def set_document_canonical_extraction(
     workspace_id: uuid.UUID,
     document_id: uuid.UUID,
@@ -490,6 +558,11 @@ def set_document_canonical_extraction(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.") from None
     except ValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from None
+    except EvidenceLinksExistError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=EVIDENCE_LOCK_DETAIL,
+        ) from None
     except Exception as exc:
         logger.error("set_canonical_failed", extra={"error": str(exc), "document_id": str(document_id)})
         raise HTTPException(

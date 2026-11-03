@@ -52,6 +52,18 @@ class DocumentRepository(BaseRepository[Document]):
         )
         return self.session.scalars(stmt).first()
 
+    def get_for_update(self, workspace_id: uuid.UUID, document_id: uuid.UUID) -> Document | None:
+        """Workspace-scoped fetch that takes a row lock (SELECT ... FOR UPDATE).
+
+        The lock is held until the surrounding transaction commits or rolls back.
+        """
+        stmt = (
+            select(Document)
+            .where(Document.workspace_id == workspace_id, Document.id == document_id)
+            .with_for_update()
+        )
+        return self.session.scalars(stmt).first()
+
     def get_by_sha256(self, workspace_id: uuid.UUID, sha256: str) -> Document | None:
         stmt = select(Document).where(
             Document.workspace_id == workspace_id,

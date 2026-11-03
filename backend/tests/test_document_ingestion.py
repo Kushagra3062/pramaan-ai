@@ -51,7 +51,12 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
     def _override_get_db():
         yield db_session
 
+    from app.api.auth import require_workspace_read, require_workspace_write
+
     app.dependency_overrides[get_db] = _override_get_db
+    # Authorization is covered by tests/test_workspace_authorization.py.
+    app.dependency_overrides[require_workspace_read] = lambda: None
+    app.dependency_overrides[require_workspace_write] = lambda: None
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

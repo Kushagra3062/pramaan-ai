@@ -13,6 +13,7 @@ import logging
 import os
 import shutil
 import uuid
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -118,3 +119,99 @@ class LocalStorageAdapter(StorageAdapter):
         except OSError:
             pass
 
+
+class GCSStorageAdapter(StorageAdapter):
+    """Private Google Cloud Storage adapter for durable Cloud Run document storage.
+
+    The bucket must be private and use uniform bucket-level access. Authentication is
+    supplied by Cloud Run's service account through Application Default Credentials;
+    no service-account JSON is read from settings or stored in the repository.
+    """
+
+    def __init__(
+        self,
+        bucket_name: str,
+        project_id: str | None = None,
+        *,
+        client: Any | None = None,
+    ) -> None:
+        if not bucket_name.strip():
+            raise StorageError("GCS bucket name cannot be empty")
+        if client is None:
+            try:
+                from google.cloud import storage
+            except ImportError as exc:
+                raise StorageError("google-cloud-storage is required for GCS document storage") from exc
+            client = storage.Client(project=project_id) if project_id else storage.Client()
+
+        self.bucket = client.bucket(bucket_name)
+
+    @staticmethod
+    def _storage_key(workspace_id: uuid.UUID, document_id: uuid.UUID, suffix: str) -> str:
+        safe_suffix = suffix.lstrip(".").lower()
+        if not safe_suffix or "/" in safe_suffix or "\\" in safe_suffix:
+            raise StorageError("Invalid document suffix")
+        return f"{workspace_id}/{document_id}.{safe_suffix}"
+
+    def save(self, workspace_id: uuid.UUID, document_id: uuid.UUID, data: bytes, suffix: str) -> str:
+        storage_key = self._storage_key(workspace_id, document_id, suffix)
+        try:
+            self.bucket.blob(storage_key).upload_from_string(data, content_type="application/pdf")
+        except Exception as exc:
+            raise StorageError("Failed to store document in GCS") from exc
+        logger.info("gcs_file_stored", extra={"event": "storage.file_stored", "storage_key": storage_key})
+        return storage_key
+
+    def load(self, storage_key: str) -> bytes:
+        try:
+            return bytes(self.bucket.blob(storage_key).download_as_bytes())
+        except Exception as exc:
+            raise StorageError(f"File not found or unreadable: {storage_key}") from exc
+
+    def delete(self, storage_key: str) -> None:
+        try:
+            self.bucket.blob(storage_key).delete()
+        except Exception:
+            # Deletion is compensating cleanup; callers must not fail if an object is already absent.
+            logger.warning("gcs_file_delete_failed", extra={"event": "storage.delete_failed", "storage_key": storage_key})
+
+
+class SupabaseStorageAdapter(StorageAdapter):
+    """Private Supabase Storage adapter; service-role key stays backend-only."""
+    def __init__(self, url: str, service_role_key: str, bucket_name: str, *, client: Any | None = None) -> None:
+        if not url.startswith("https://") or not service_role_key or not bucket_name.strip():
+            raise StorageError("Supabase Storage requires HTTPS URL, service-role key, and bucket")
+        if client is None:
+            try:
+                from supabase import create_client
+                client = create_client(url, service_role_key)
+            except Exception as exc:
+                raise StorageError("Supabase Storage client is unavailable") from exc
+        self.bucket = client.storage.from_(bucket_name)
+
+    @staticmethod
+    def _key(workspace_id: uuid.UUID, document_id: uuid.UUID, suffix: str) -> str:
+        safe = suffix.lstrip(".").lower()
+        if safe != "pdf":
+            raise StorageError("Invalid document suffix")
+        return f"{workspace_id}/{document_id}.{safe}"
+
+    def save(self, workspace_id: uuid.UUID, document_id: uuid.UUID, data: bytes, suffix: str) -> str:
+        key = self._key(workspace_id, document_id, suffix)
+        try:
+            self.bucket.upload(key, data, {"content-type": "application/pdf", "upsert": "false"})
+        except Exception as exc:
+            raise StorageError("Failed to store document in Supabase Storage") from exc
+        return key
+
+    def load(self, storage_key: str) -> bytes:
+        try:
+            return bytes(self.bucket.download(storage_key))
+        except Exception as exc:
+            raise StorageError("File not found or unreadable") from exc
+
+    def delete(self, storage_key: str) -> None:
+        try:
+            self.bucket.remove([storage_key])
+        except Exception:
+            logger.warning("supabase_file_delete_failed", extra={"event": "storage.delete_failed", "storage_key": storage_key})

@@ -1,9 +1,10 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -93,6 +95,7 @@ class ModelUsage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_model_usage_request_id", "request_id"),
         Index("ix_model_usage_analysis", "analysis_id"),
     )
+    # NOTE: ModelCallBudget is defined after ModelUsage above; see the end of this module.
 
     # Relationships
     workspace: Mapped["Workspace | None"] = relationship("Workspace")
@@ -156,3 +159,29 @@ class EvaluationCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Relationships
     run: Mapped["EvaluationRun"] = relationship("EvaluationRun", back_populates="cases")
+
+
+class ModelCallBudget(Base):
+    """Installation-wide daily model-call budget counter, one row per UTC calendar day.
+
+    ``reserved_calls`` counts slots that are currently held by in-flight runs *or* were
+    already spent. It is decremented only when a run releases capacity whose requests were
+    demonstrably never sent, so a reservation abandoned by a crashed process keeps counting
+    against that day instead of restoring capacity that may have been used. The next UTC day
+    is a new row, so the budget resets without any scheduled job.
+
+    This is deliberately *not* token accounting: ModelUsage stays the record of actual
+    provider usage (tokens, latency, status).
+    """
+
+    __tablename__ = "model_call_budget"
+
+    budget_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    reserved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("reserved_calls >= 0", name="ck_model_call_budget_non_negative"),
+    )

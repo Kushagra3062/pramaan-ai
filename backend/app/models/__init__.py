@@ -1,4 +1,10 @@
-from app.models.audit_eval import AuditEvent, EvaluationCase, EvaluationRun, ModelUsage
+from app.models.audit_eval import (
+    AuditEvent,
+    EvaluationCase,
+    EvaluationRun,
+    ModelCallBudget,
+    ModelUsage,
+)
 from app.models.base import Base, FullTimestampMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.document import Document, DocumentChunk, DocumentPage, PageExtractionAttempt
 from app.models.enums import (
@@ -85,6 +91,7 @@ __all__ = [
     "ActionItem",
     # Audit & Eval
     "AuditEvent",
+    "ModelCallBudget",
     "ModelUsage",
     "EvaluationRun",
     "EvaluationCase",
