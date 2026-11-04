@@ -40,11 +40,19 @@ def test_traversal_depth_two_and_cycle_safe(db_session: Session, test_workspace:
                      GraphEdgeStatus.VERIFIED)
     db_session.flush()
     result = traverse_impact(db_session, wid, a.id)
-    assert result.reached_node_count == 3  # a, b, c — d is depth 3
-    assert d.id not in result.nodes
+    # Bidirectional: a→c via the incoming back edge, then c→d at depth 2.
+    assert result.reached_node_count == 4
+    assert result.nodes.keys() == {a.id, b.id, c.id, d.id}
     assert result.validated_paths
     assert not result.candidate_paths
     assert result.truncated is False
+    for path in result.validated_paths:
+        assert len(path.edge_ids) <= 2
+        assert len(set(path.edge_ids)) == len(path.edge_ids)  # no edge reused in one path
+    # Deterministic for a fixed snapshot.
+    rerun = traverse_impact(db_session, wid, a.id)
+    assert rerun.nodes.keys() == result.nodes.keys()
+    assert len(rerun.validated_paths) == len(result.validated_paths)
 
 
 def test_candidate_edges_reported_separately(db_session: Session, test_workspace: Workspace):

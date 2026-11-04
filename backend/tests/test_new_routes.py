@@ -47,7 +47,9 @@ def test_conflict_detect_list_resolve_flow(client: TestClient, db_session: Sessi
     assert detected.status_code == 200, detected.text
     assert detected.json()["candidates_created"] == 1
     conflict_id = detected.json()["conflicts"][0]["id"]
-    assert detected.json()["conflicts"][0]["fact_a"]["document_filename"] == "a.pdf"
+    # fact_a/fact_b are canonically ordered by UUID, not by document: both sides present.
+    sides = detected.json()["conflicts"][0]
+    assert {sides["fact_a"]["document_filename"], sides["fact_b"]["document_filename"]} == {"a.pdf", "b.pdf"}
     listed = authed.get(f"{base}?status=OPEN")
     assert listed.status_code == 200
     assert listed.json()["total"] == 1

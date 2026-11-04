@@ -67,13 +67,19 @@ def test_detection_creates_open_candidates_for_cross_document_mismatch(
 
 
 def test_detection_ignores_same_value_and_same_document(db_session: Session, test_workspace: Workspace):
+    # Same value across documents: no mismatch.
     first = _document(db_session, test_workspace.id, "a.pdf")
     second = _document(db_session, test_workspace.id, "b.pdf")
     _fact(db_session, test_workspace.id, first.id, "AMOUNT", "INR 5000")
     _fact(db_session, test_workspace.id, second.id, "AMOUNT", "INR 5000")
-    _fact(db_session, test_workspace.id, first.id, "AMOUNT", "INR 9000")
     summary, _ = detect_conflict_candidates(db_session, test_workspace.id)
     assert summary.candidates_created == 0
+    # Different values within ONE document are never cross-document candidates.
+    solo = _document(db_session, test_workspace.id, "solo.pdf")
+    _fact(db_session, test_workspace.id, solo.id, "IDENTIFIER", "AAA-1")
+    _fact(db_session, test_workspace.id, solo.id, "IDENTIFIER", "BBB-2")
+    rerun, _ = detect_conflict_candidates(db_session, test_workspace.id)
+    assert rerun.candidates_created == 0
 
 
 def test_action_create_is_idempotent_on_key(db_session: Session, test_workspace: Workspace, test_user: User):

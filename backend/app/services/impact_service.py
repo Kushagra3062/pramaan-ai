@@ -1,9 +1,9 @@
 """Bounded Evidence-to-Impact traversal (FR-032).
 
 Breadth-first search from one graph node, maximum depth 2, cycle-safe, with
-configurable node/edge caps. Edges with DETERMINISTIC or HUMAN_CONFIRMED
-provenance (and not REJECTED) form validated paths; MODEL_PROPOSED or CANDIDATE
-edges are reported separately and never presented as validated.
+configurable node/edge caps. Only DETERMINISTIC or HUMAN_CONFIRMED edges with
+VERIFIED status form validated paths; anything else (MODEL_PROPOSED provenance
+or CANDIDATE/REJECTED status) is reported separately and never as validated.
 """
 
 from __future__ import annotations
@@ -25,7 +25,10 @@ _VALIDATED_PROVENANCE = {GraphProvenanceType.DETERMINISTIC.value, GraphProvenanc
 
 
 def is_validated_edge(edge: GraphEdge) -> bool:
-    return edge.provenance_type in _VALIDATED_PROVENANCE and edge.verification_status != GraphEdgeStatus.REJECTED.value
+    return (
+        edge.provenance_type in _VALIDATED_PROVENANCE
+        and edge.verification_status == GraphEdgeStatus.VERIFIED.value
+    )
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,8 @@ def traverse_impact(
             for edge, neighbor_id in neighbors:
                 if edge.workspace_id != workspace_id:
                     continue
+                if edge.id in edge_path:
+                    continue  # never reuse an edge inside one path (no a→b→a backtracking)
                 if len(result.edges) >= edge_cap:
                     result.truncated = True
                     continue

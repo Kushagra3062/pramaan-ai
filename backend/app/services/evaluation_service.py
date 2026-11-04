@@ -180,7 +180,11 @@ def run_benchmark(
             facts_f1 = (entry.get("facts") or {}).get("f1")
             reqs_f1 = (entry.get("requirements") or {}).get("f1")
             scores = [value for value in (facts_f1, reqs_f1) if isinstance(value, (int, float))]
-            status = EvaluationCaseStatus.PASSED if scores and min(scores) >= 1.0 else EvaluationCaseStatus.FAILED
+            if not scores:
+                # Nothing expected and nothing predicted (e.g. the empty case): correct.
+                status = EvaluationCaseStatus.PASSED
+            else:
+                status = EvaluationCaseStatus.PASSED if min(scores) >= 1.0 else EvaluationCaseStatus.FAILED
         if status == EvaluationCaseStatus.PASSED:
             passed += 1
         elif status == EvaluationCaseStatus.FAILED:
