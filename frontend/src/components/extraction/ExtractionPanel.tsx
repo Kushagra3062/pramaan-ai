@@ -224,8 +224,8 @@ export function ExtractionPanel({
         active={active}
       />
       <p className="x-muted x-note">
-        Prototype for local demonstration: there is no authentication or approval workflow. All results are model-proposed and not
-        human reviewed; an exact quote match only shows the text exists in the source.
+        Results are workspace-scoped. All results are model-proposed and not human reviewed; an exact quote match only shows the
+        text exists in the source.
       </p>
     </div>
   );

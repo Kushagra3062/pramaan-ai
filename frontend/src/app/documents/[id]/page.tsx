@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app/AppShell";
 import { PageTitle } from "@/components/app/ProductPage";
 import { getChunks, getDocument, getPages, type ChunkItem, type DocumentItem, type PageItem } from "@/lib/api/documents";
-import { FactsList } from "@/components/extraction/FactsList";
-import { RequirementsList } from "@/components/extraction/RequirementsList";
+import { ExtractionPanel } from "@/components/extraction/ExtractionPanel";
+import { OcrPanel } from "@/components/extraction/OcrPanel";
 
 export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
@@ -17,21 +17,33 @@ export default function DocumentDetailPage() {
   const [chunks, setChunks] = useState<ChunkItem[]>([]);
   const [message, setMessage] = useState("Loading document…");
 
+  const load = useCallback(async () => {
+    const [d, p, c] = await Promise.all([
+      getDocument(workspace, params.id),
+      getPages(workspace, params.id),
+      getChunks(workspace, params.id),
+    ]);
+    if (!d.ok) {
+      setMessage(d.message);
+      return;
+    }
+    setDoc(d.data);
+    if (p.ok) setPages(p.data);
+    if (c.ok) setChunks(c.data);
+    setMessage("");
+  }, [workspace, params.id]);
+
   useEffect(() => {
     if (!workspace) {
       setMessage("Choose this document from a workspace document list.");
       return;
     }
-    void Promise.all([getDocument(workspace, params.id), getPages(workspace, params.id), getChunks(workspace, params.id)]).then(([d, p, c]) => {
-      if (!d.ok) return setMessage(d.message);
-      setDoc(d.data);
-      if (p.ok) setPages(p.data);
-      if (c.ok) setChunks(c.data);
-      setMessage("");
-    });
-  }, [workspace, params.id]);
+    setMessage("Loading document…");
+    void load();
+  }, [workspace, load]);
 
-  const chunksById = Object.fromEntries(chunks.map((c) => [c.id, c]));
+  const needsOcr = (doc?.processing_status === "NEEDS_OCR") || pages.some((p) => p.extraction_status === "NEEDS_OCR");
+  const pendingPages = pages.filter((p) => p.extraction_status === "NEEDS_OCR").length;
 
   return (
     <AppShell>
@@ -81,10 +93,18 @@ export default function DocumentDetailPage() {
               ))}
             </div>
           </section>
-          <section className="x-stack">
-            <FactsList workspaceId={workspace} documentId={params.id} chunksById={chunksById} refreshToken={0} active />
-            <RequirementsList workspaceId={workspace} documentId={params.id} chunksById={chunksById} refreshToken={0} active />
-          </section>
+          <OcrPanel workspaceId={workspace} doc={doc} needsOcr={needsOcr} pendingPages={pendingPages} onFinished={() => void load()} />
+          {doc && (
+            <ExtractionPanel
+              workspaceId={workspace}
+              doc={{ id: doc.id, original_filename: doc.original_filename, processing_status: doc.processing_status, page_count: doc.page_count }}
+              pages={pages}
+              chunks={chunks}
+              active
+              hasEvidence={false}
+              onExtractionFinished={() => void load()}
+            />
+          )}
         </>
       )}
     </AppShell>

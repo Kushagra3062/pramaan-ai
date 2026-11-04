@@ -23,6 +23,8 @@ DECLARE
     workspace_id uuid := gen_random_uuid();
     membership_id uuid := gen_random_uuid();
 BEGIN
+    -- Tolerate accidental copy/paste spaces around the email.
+    owner_email := btrim(owner_email);
     IF owner_email = 'OWNER_EMAIL' THEN
         RAISE EXCEPTION 'Replace OWNER_EMAIL before running this script.';
     END IF;
@@ -68,7 +70,7 @@ SELECT
 FROM public.users AS u
 JOIN public.workspace_members AS wm ON wm.user_id = u.id
 JOIN public.workspaces AS w ON w.id = wm.workspace_id
-WHERE lower(u.email) = lower('OWNER_EMAIL')
+WHERE lower(u.email) = lower(btrim('OWNER_EMAIL'))
   AND w.slug = 'pramaan-demo';
 
 COMMIT;
