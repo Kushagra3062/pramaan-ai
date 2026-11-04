@@ -77,7 +77,7 @@ export function extractSafeDetail(body: unknown): string | null {
 export function defaultMessageForStatus(status: number | null): string {
   switch (status) {
     case null:
-      return "Could not reach the server. The request may still be running or may have completed on the server — refresh the lists before trying again.";
+      return "Could not reach the server. It may be waking from idle (this can take up to a minute) — wait, then retry. A request sent before the connection dropped may still have completed on the server, so refresh the lists before trying again.";
     case 404:
       return "Document not found.";
     case 409:
