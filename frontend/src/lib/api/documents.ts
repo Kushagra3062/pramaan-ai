@@ -1,4 +1,5 @@
-import { describeError, isRecord, requestJson } from "./client";
+import { API_BASE, describeError, isRecord, requestJson } from "./client";
+import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 export interface DocumentItem { id: string; original_filename: string; processing_status: string; file_size_bytes: number; page_count: number | null; created_at: string; detected_language: string | null; }
 export interface PageItem { id: string; page_number: number; extracted_text: string | null; extraction_status: string; extraction_method: string; }
@@ -14,6 +15,24 @@ export async function getDocument(workspaceId: string, id: string): Promise<Resu
 export async function getPages(workspaceId: string, id: string): Promise<Result<PageItem[]>> { const response = await requestJson(docPath(workspaceId, `/${encodeURIComponent(id)}/pages`)); return response.status && response.status < 300 && isRecord(response.body) && Array.isArray(response.body.items) ? { ok: true, data: response.body.items as PageItem[] } : { ok: false, status: response.status, message: describeError(response.status, response.body) }; }
 export async function getChunks(workspaceId: string, id: string): Promise<Result<ChunkItem[]>> { const response = await requestJson(docPath(workspaceId, `/${encodeURIComponent(id)}/chunks`)); return response.status && response.status < 300 && isRecord(response.body) && Array.isArray(response.body.items) ? { ok: true, data: response.body.items as ChunkItem[] } : { ok: false, status: response.status, message: describeError(response.status, response.body) }; }
 export async function uploadDocument(workspaceId: string, file: File): Promise<Result<{ id?: string; existing_document_id?: string; processing_status: string }>> { const form = new FormData(); form.append("file", file, file.name); const response = await requestJson(docPath(workspaceId), { method: "POST", body: form }); return response.status && response.status < 300 && isRecord(response.body) ? { ok: true, data: response.body as { id?: string; existing_document_id?: string; processing_status: string } } : { ok: false, status: response.status, message: describeError(response.status, response.body) }; }
+export interface PageComparisonAttempt { provider: string; extracted_text: string; status: string; }
+export interface PageComparison { page_number: number; canonical_method: string; canonical_text: string; tesseract_attempt: PageComparisonAttempt | null; meta_vision_attempt: PageComparisonAttempt | null; }
+export async function getComparison(workspaceId: string, id: string): Promise<Result<PageComparison[]>> { const response = await requestJson(docPath(workspaceId, `/${encodeURIComponent(id)}/compare`)); return response.status && response.status < 300 && Array.isArray(response.body) ? { ok: true, data: response.body as PageComparison[] } : { ok: false, status: response.status, message: describeError(response.status, response.body) }; }
 function isOcrRun(body: unknown): body is OcrRunResult { return isRecord(body) && typeof body.document_id === "string" && typeof body.processing_status === "string" && typeof body.provider_mode === "string" && typeof body.pages_processed === "number" && typeof body.chunks_regenerated === "number" && typeof body.message === "string" && Array.isArray(body.results); }
+/** Fetch the private source PDF with the session bearer token and return a blob URL for inline viewing. */
+export async function getDocumentFileUrl(workspaceId: string, id: string): Promise<Result<string>> {
+  try {
+    const client = getSupabaseBrowserClient();
+    const { data } = client ? await client.auth.getSession() : { data: { session: null } };
+    const headers = new Headers();
+    if (data.session?.access_token) headers.set("Authorization", `Bearer ${data.session.access_token}`);
+    const response = await fetch(`${API_BASE}${docPath(workspaceId, `/${encodeURIComponent(id)}/file`)}`, { headers, cache: "no-store" });
+    if (!response.ok) return { ok: false, status: response.status, message: describeError(response.status, null) };
+    const blob = await response.blob();
+    return { ok: true, data: URL.createObjectURL(blob) };
+  } catch {
+    return { ok: false, status: null, message: describeError(null, null) };
+  }
+}
 /** POST /ocr. Exactly one request; never retried here. Compare mode stays in the dev console. */
 export async function runOcr(workspaceId: string, id: string, trigger: OcrTriggerBody): Promise<Result<OcrRunResult>> { const response = await requestJson(docPath(workspaceId, `/${encodeURIComponent(id)}/ocr`), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(trigger) }); return response.status && response.status < 300 && isOcrRun(response.body) ? { ok: true, data: response.body } : { ok: false, status: response.status, message: describeError(response.status, response.body) }; }

@@ -8,7 +8,18 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import dev, documents, extraction, health, workspaces
+from app.api.routes import (
+    actions,
+    analyses,
+    conflicts,
+    dev,
+    documents,
+    evaluation,
+    extraction,
+    graph,
+    health,
+    workspaces,
+)
 from app.core import metrics
 from app.core.config import get_settings
 from app.core.logging_config import (
@@ -52,6 +63,11 @@ app.include_router(health.router)
 app.include_router(workspaces.router)
 app.include_router(documents.router)
 app.include_router(extraction.router)
+app.include_router(conflicts.router)
+app.include_router(actions.router)
+app.include_router(graph.router)
+app.include_router(analyses.router)
+app.include_router(evaluation.router)
 if settings.app_env.lower() in {"local", "development", "test"}:
     app.include_router(dev.router)
 

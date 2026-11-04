@@ -3,11 +3,11 @@ Structured extraction API: run extraction, list facts, list requirements.
 
 Routes are workspace/document scoped under ``/api/v1/workspaces/{workspace_id}/documents``.
 
-SECURITY LIMITATION: there is no authentication or workspace-membership authorization yet.
-Scoping here guarantees path consistency only; it is not user authorization. The extraction
-endpoint spends real model API usage, and the per-request call cap is NOT rate limiting.
-These APIs are for the local/hackathon demo until authentication, authorization and cost
-controls suitable for public deployment exist.
+All routes require Supabase JWT authentication plus workspace membership
+(``require_workspace_read`` for reads, ``require_workspace_write`` for the
+extraction run). The extraction endpoint spends real model API usage; the
+per-request call cap plus the installation-wide daily budget are cost controls,
+not per-user rate limiting.
 """
 
 from __future__ import annotations

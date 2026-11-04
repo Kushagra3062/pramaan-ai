@@ -101,6 +101,11 @@ class OCRExecutionError(DocumentServiceError):
     """Failure during OCR processing."""
 
 
+def get_storage_adapter(settings: Settings) -> StorageAdapter:
+    """Create a storage adapter from settings (public for server-mediated reads)."""
+    return _get_storage(settings)
+
+
 def _get_storage(settings: Settings) -> StorageAdapter:
     """Create a storage adapter from settings."""
     if settings.storage_backend == "gcs":

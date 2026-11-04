@@ -8,6 +8,7 @@ const links = [
   { href: "/", label: "Overview", index: "01" },
   { href: "/documents", label: "Documents", index: "02" },
   { href: "/extraction", label: "Extraction", index: "03" },
+  { href: "/onboarding", label: "Workspaces", index: "04" },
 ];
 
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {

@@ -1,0 +1,55 @@
+# Pramaan AI — Render blueprint (backend) + Vercel (frontend) deployment.
+#
+# Backend runs from backend/Dockerfile (python 3.11 + tesseract eng/mal).
+# The image entrypoint applies `alembic upgrade head` before starting uvicorn,
+# so Render needs no separate migration job. Frontend deploys from ./frontend
+# on Vercel with NEXT_PUBLIC_* vars (see frontend/.env.example).
+#
+# Apply: Render dashboard -> New -> Blueprint -> select this repo (render.yaml).
+# Secrets marked `sync: false` must be set in the Render dashboard (Environment).
+services:
+  - type: web
+    name: pramaan-ai-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /health/ready
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false # postgresql+psycopg://...@<supabase-pooler-host>:6543/postgres?sslmode=require
+      - key: MODEL_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false # https://<project-ref>.supabase.co
+      - key: SUPABASE_JWT_AUDIENCE
+        value: authenticated
+      - key: STORAGE_BACKEND
+        value: supabase
+      - key: SUPABASE_STORAGE_BUCKET
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false # exact https Vercel origin, e.g. https://pramaan-ai.vercel.app
+      - key: META_MODEL_ID
+        value: muse-spark-1.3
+      - key: META_MAX_OUTPUT_TOKENS
+        value: "8000"
+      - key: LANGFUSE_ENABLED
+        value: "true"
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_BASE_URL
+        value: https://cloud.langfuse.com
+      - key: MAX_MODEL_CALLS_PER_REQUEST
+        value: "4"
+      - key: DAILY_MODEL_CALL_LIMIT
+        value: "20"
+      - key: PYTHONUNBUFFERED
+        value: "1"

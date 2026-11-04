@@ -10,8 +10,8 @@ export async function middleware(request: NextRequest) {
   const { data } = await supabase.auth.getClaims();
   const claims = data?.claims;
   if (!claims && request.nextUrl.pathname !== "/login") return NextResponse.redirect(new URL("/login", request.url));
-  if (claims && request.nextUrl.pathname === "/login") return NextResponse.redirect(new URL("/test", request.url));
+  if (claims && request.nextUrl.pathname === "/login") return NextResponse.redirect(new URL("/onboarding", request.url));
   return response;
 }
 
-export const config = { matcher: ["/test"] };
+export const config = { matcher: ["/test", "/onboarding", "/documents/:path*", "/extraction", "/w/:path*"] };

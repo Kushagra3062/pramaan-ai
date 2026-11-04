@@ -22,5 +22,6 @@ RUN pip install --upgrade pip && pip install .
 
 USER appuser
 
-# Cloud Run injects PORT. Use a single process and let Cloud Run control instance count.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# Cloud Run and Render inject PORT. Apply migrations before serving: `alembic
+# upgrade head` is idempotent, so a redeploy or an extra instance is safe.
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]

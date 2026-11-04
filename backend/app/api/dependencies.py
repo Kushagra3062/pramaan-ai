@@ -1,9 +1,9 @@
 """Shared FastAPI dependencies.
 
-NOTE: the application has no authentication or workspace-membership authorization yet.
-Workspace/document scoping below is path consistency only, NOT user authorization. When
-authentication is added, put the identity/membership check in ``get_scoped_document`` (and
-sibling dependencies) so every document-scoped route inherits it from one place.
+Authentication is enforced by router-level ``require_workspace_read`` /
+``require_workspace_write`` dependencies (Supabase JWT + membership check in
+``app.api.auth``). ``get_scoped_document`` additionally guarantees the document
+belongs to the path workspace, so cross-workspace access returns 404.
 """
 
 from __future__ import annotations

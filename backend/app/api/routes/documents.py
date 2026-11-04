@@ -10,9 +10,11 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_workspace_read, require_workspace_write
+from app.api.dependencies import get_scoped_document
 from app.core import metrics
 from app.core.config import Settings, get_settings
 from app.db.engine import get_db
@@ -48,6 +50,7 @@ from app.services.document_service import (
     OCRExecutionError,
     ValidationError,
     WorkspaceNotFoundError,
+    get_storage_adapter,
     process_document_ocr,
     select_canonical_extraction,
     upload_document,
@@ -195,6 +198,31 @@ def get_document(
         )
 
     return DocumentResponse.model_validate(doc)
+
+
+# ── Server-mediated PDF view ──────────────────────────────────────────────────
+
+
+@router.get("/{document_id}/file")
+def get_document_file(
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """Stream the private source PDF inline. Never exposes storage keys or paths."""
+    doc = get_scoped_document(workspace_id, document_id, session)
+    try:
+        data = get_storage_adapter(settings).load(doc.storage_key)
+    except Exception:
+        logger.warning("document_file_unavailable", extra={"event": "document.file_unavailable"})
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source file is unavailable.") from None
+    safe_name = "".join(char for char in doc.original_filename if char.isalnum() or char in ("-", "_", ".", " ")).strip() or "document.pdf"
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{safe_name}"', "X-Content-Type-Options": "nosniff"},
+    )
 
 
 # ── Get document pages ────────────────────────────────────────────────────────

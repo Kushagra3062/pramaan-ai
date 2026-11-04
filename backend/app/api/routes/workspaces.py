@@ -10,12 +10,16 @@ from sqlalchemy.orm import Session
 
 from app.api.auth import AuthenticatedUser, get_authenticated_user, require_workspace_read
 from app.db.engine import get_db
+from app.db.repositories.audit_eval_repo import AuditRepository, ModelUsageRepository
 from app.models.document import Document
 from app.models.enums import DocumentProcessingStatus, RequirementStatus
 from app.models.fact_requirement import ExtractedFact, Requirement
 from app.models.workspace import Workspace, WorkspaceMember
 from app.schemas.workspace_api import (
+    ActivityEventResponse,
     CurrentUserResponse,
+    ModelUsageItemResponse,
+    UsageOverviewResponse,
     WorkspaceMembershipResponse,
     WorkspaceOverviewResponse,
 )
@@ -90,4 +94,48 @@ def get_workspace_overview(workspace_id: uuid.UUID, session: Session = Depends(g
         extracted_facts=int(fact_count),
         requirements=int(requirement_count),
         pending_reviews=int(pending_review_count),
+    )
+
+
+@router.get(
+    "/api/v1/workspaces/{workspace_id}/activity",
+    response_model=list[ActivityEventResponse],
+    dependencies=[Depends(require_workspace_read)],
+)
+def list_activity(workspace_id: uuid.UUID, session: Session = Depends(get_db)) -> list[ActivityEventResponse]:
+    """Recent audit events: actor/system, request ID and timestamp per event."""
+    return [
+        ActivityEventResponse(
+            id=event.id, event_type=event.event_type, entity_type=event.entity_type,
+            entity_id=event.entity_id, actor_user_id=event.actor_user_id,
+            request_id=event.request_id, created_at=event.created_at,
+        )
+        for event in AuditRepository(session).list_by_workspace(workspace_id, limit=50)
+    ]
+
+
+@router.get(
+    "/api/v1/workspaces/{workspace_id}/usage",
+    response_model=UsageOverviewResponse,
+    dependencies=[Depends(require_workspace_read)],
+)
+def get_usage(workspace_id: uuid.UUID, session: Session = Depends(get_db)) -> UsageOverviewResponse:
+    """Model usage ledger. Unknown cost stays null (rendered as unknown, never zero)."""
+    repo = ModelUsageRepository(session)
+    items = repo.list_by_workspace(workspace_id, limit=100)
+    totals = repo.get_total_tokens(workspace_id)
+    return UsageOverviewResponse(
+        total_input_tokens=totals["input_tokens"],
+        total_output_tokens=totals["output_tokens"],
+        total_requests=len(items),
+        items=[
+            ModelUsageItemResponse(
+                id=item.id, provider=item.provider, model_id=item.model_id,
+                request_id=item.request_id, input_tokens=item.input_tokens,
+                output_tokens=item.output_tokens, latency_ms=item.latency_ms,
+                estimated_cost=float(item.estimated_cost) if item.estimated_cost is not None else None,
+                status=item.status, analysis_id=item.analysis_id, created_at=item.created_at,
+            )
+            for item in items
+        ],
     )

@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 TRACE_NAME = "pramaan.extraction.run"
 PAGE_SPAN_NAME = "pramaan.extraction.page"
 GENERATION_NAME = "muse-spark.extraction"
+ANALYSIS_TRACE_NAME = "pramaan.analysis.run"
+EVALUATION_TRACE_NAME = "pramaan.evaluation.run"
 LANGFUSE_TIMEOUT_SECONDS = 5
 MAX_ATTRIBUTE_VALUE_LENGTH = 200
 
@@ -81,6 +83,28 @@ ALLOWED_ATTRIBUTE_KEYS = frozenset(
         "pages_processed",
         "pages_skipped",
         "pages_failed",
+        "analysis_id",
+        "retrieved_chunks",
+        "cited_chunks",
+        "unsupported_claims",
+        "unknown_citations",
+        "question_length",
+        "guardrail_input_passed",
+        "guardrail_input_flags",
+        "guardrail_output_passed",
+        "guardrail_output_flags",
+        "dataset_version",
+        "evaluator_version",
+        "mode",
+        "case_count",
+        "passed_cases",
+        "failed_cases",
+        "error_cases",
+        "fact_f1",
+        "requirement_f1",
+        "quote_match_rate",
+        "preservation_rate",
+        "run_id",
     }
 )
 
@@ -178,6 +202,39 @@ class Tracer:
         if observation is None:
             return RunTrace(None, self)
         return RunTrace(observation, self)
+
+    def record_score(
+        self,
+        *,
+        name: str,
+        value: float,
+        trace_id: str | None = None,
+        observation_id: str | None = None,
+        comment: str | None = None,
+    ) -> bool:
+        """Record a numeric Langfuse score. Content-free, fault-tolerant, never raises."""
+        client = self._client
+        if client is None:
+            return False
+        clean_name = (name or "").strip()[:100]
+        if not clean_name or not isinstance(value, (int, float)) or isinstance(value, bool):
+            return False
+        payload: dict[str, Any] = {"name": clean_name, "value": float(value)}
+        if trace_id:
+            payload["trace_id"] = trace_id.strip()[:200]
+        if observation_id:
+            payload["observation_id"] = observation_id.strip()[:200]
+        if comment:
+            payload["comment"] = comment.strip()[:200]
+        try:
+            create_score = getattr(client, "create_score", None) or getattr(client, "score", None)
+            if not callable(create_score):
+                return False
+            create_score(**payload)
+        except Exception as exc:
+            self._disable("record_score", exc)
+            return False
+        return True
 
     def flush(self) -> None:
         client = self._client
@@ -521,6 +578,69 @@ def start_extraction_trace(
         },
         version=prompt_version,
     )
+
+
+def start_analysis_trace(
+    *,
+    analysis_id: str,
+    model_id: str,
+    prompt_version: str,
+    document_id: str | None = None,
+) -> RunTrace:
+    """Start the single trace for one Investigate analysis run."""
+    return get_tracer().start_run(
+        metadata={
+            "analysis_id": analysis_id,
+            "document_id": document_id,
+            "model_id": model_id,
+            "prompt_version": prompt_version,
+        },
+        version=prompt_version,
+        name=ANALYSIS_TRACE_NAME,
+    )
+
+
+def start_evaluation_trace(
+    *,
+    run_id: str,
+    dataset_version: str,
+    evaluator_version: str,
+    mode: str,
+) -> RunTrace:
+    """Start the single trace for one offline/live benchmark run."""
+    return get_tracer().start_run(
+        metadata={
+            "run_id": run_id,
+            "dataset_version": dataset_version,
+            "evaluator_version": evaluator_version,
+            "mode": mode,
+        },
+        version=evaluator_version,
+        name=EVALUATION_TRACE_NAME,
+    )
+
+
+def record_evaluation_scores(
+    *,
+    fact_f1: float | None,
+    requirement_f1: float | None,
+    quote_match_rate: float | None,
+    trace_id: str | None = None,
+) -> bool:
+    """Push aggregate benchmark scores to Langfuse. Returns False when inactive."""
+    tracer = get_tracer()
+    if not tracer.active:
+        return False
+    submitted = False
+    for name, value in (
+        ("extraction.fact_f1", fact_f1),
+        ("extraction.requirement_f1", requirement_f1),
+        ("extraction.quote_match_rate", quote_match_rate),
+    ):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            submitted = tracer.record_score(name=name, value=float(value), trace_id=trace_id) or submitted
+    tracer.flush()
+    return submitted
 
 
 def open_generation(*, model_id: str, prompt_version: str) -> GenerationTrace:
