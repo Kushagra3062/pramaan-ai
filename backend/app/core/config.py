@@ -1,3 +1,4 @@
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -10,6 +11,9 @@ class Settings(BaseSettings):
     app_env: str = "local"
     log_level: str = "INFO"
     allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # Optional extra CORS rule for expiring preview deployments (e.g. one Vercel
+    # team's preview URLs). Must be an https://-anchored regex when set.
+    allowed_origin_regex: str | None = None
 
     database_url: str = "postgresql+psycopg://pramaan:pramaan_local_only@127.0.0.1:5433/pramaan_dev"
 
@@ -106,6 +110,13 @@ class Settings(BaseSettings):
             raise ValueError("production DATABASE_URL must use PostgreSQL with sslmode=require")
         if not self.cors_origins or any(not origin.startswith("https://") for origin in self.cors_origins):
             raise ValueError("production ALLOWED_ORIGINS must contain only explicit HTTPS origins")
+        if self.allowed_origin_regex:
+            if not self.allowed_origin_regex.startswith("https://"):
+                raise ValueError("production ALLOWED_ORIGIN_REGEX must be https://-anchored")
+            try:
+                re.compile(self.allowed_origin_regex)
+            except re.error as exc:
+                raise ValueError(f"production ALLOWED_ORIGIN_REGEX is not a valid regex: {exc}") from exc
         return self
 
 
